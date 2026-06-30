@@ -1,22 +1,33 @@
 "use client";
 
 /**
- * RelaySwapPanel — Bridge/Swap flow powered by Relay's official SwapWidget.
- *
- * Bridge/Swap flow via Relay (same-chain swaps and cross-chain bridges).
- * Execution happens inside the widget; onSwapSuccess surfaces a toast.
- * CCTP/Chainrails are out of scope here — add a router fork later if needed.
+ * RelaySwapPanel — Bridge & Swap via Relay's SwapWidget (same-chain swaps and
+ * cross-chain bridges, EVM + Solana). Execution happens inside the widget.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { SwapWidget, type Token } from "@relayprotocol/relay-kit-ui";
-import { adaptViemWallet } from "@relayprotocol/relay-sdk";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  SwapWidget,
+  type LinkedWallet,
+  type Token,
+} from "@relayprotocol/relay-kit-ui";
+import {
+  adaptViemWallet,
+  type AdaptedWallet,
+  type RelayChain,
+} from "@relayprotocol/relay-sdk";
+import { adaptSolanaWallet } from "@relayprotocol/relay-svm-wallet-adapter";
 import { configureDynamicChains } from "@relayprotocol/relay-sdk/chain-utils";
-import { useConnectModal } from "@rainbow-me/rainbowkit";
+import { useAccountModal, useConnectModal } from "@rainbow-me/rainbowkit";
 import { useWalletClient } from "wagmi";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
+import type { SendOptions, VersionedTransaction } from "@solana/web3.js";
 import toast from "react-hot-toast";
 import { Icon } from "./icons";
 import { clearPendingLaunch, loadPendingLaunch } from "./swapUrl";
+import { getSolanaBalance } from "./solanaBalance";
+import { getSolanaConnection, SOLANA_CHAIN_ID } from "@/config/solana";
 import {
   DEFAULT_SETTLEMENT_CHAIN_ID,
   getChain,
@@ -75,26 +86,91 @@ function pairFromLaunch(
 
 export function RelaySwapPanel() {
   const { openConnectModal } = useConnectModal();
+  const { openAccountModal } = useAccountModal();
   const { data: walletClient } = useWalletClient();
+  const connection = getSolanaConnection();
+  const {
+    publicKey,
+    sendTransaction,
+    wallet: solanaWalletAdapter,
+  } = useWallet();
+  const { setVisible: setSolanaModalVisible } = useWalletModal();
 
-  const wallet = useMemo(
-    () => (walletClient ? adaptViemWallet(walletClient) : undefined),
-    [walletClient]
-  );
+  const evmAddress = walletClient?.account?.address;
+  const solanaAddress = publicKey?.toBase58();
 
   const [fromToken, setFromToken] = useState<Token | undefined>();
   const [toToken, setToToken] = useState<Token | undefined>();
+  // Held back until the launch prefill is applied — the widget reads
+  // defaultAmount only on first mount.
   const [defaultAmount, setDefaultAmount] = useState("10");
-  // The widget reads `defaultAmount` only on its first mount, so we hold it
-  // back until the chat prefill is applied — otherwise it locks onto "10".
   const [ready, setReady] = useState(false);
-  // Our static config only covers base/arb/polygon/bnb with template icon URLs.
-  // Pull Relay's full chain list (real logos, all chains, token support) onto
-  // the shared client so the widget matches the real Relay app — and so tokens
-  // on other chains (e.g. PENGU) are actually swappable. Falls back to the
-  // static config if the fetch fails.
   const [chainsReady, setChainsReady] = useState(false);
 
+  // Relay signs from the Sell chain, so the active wallet follows the Sell token.
+  const fromIsSolana = fromToken?.chainId === SOLANA_CHAIN_ID;
+
+  // Connected wallets, shown in the per-side Sell/Buy selectors.
+  const linkedWallets = useMemo<LinkedWallet[]>(() => {
+    const list: LinkedWallet[] = [];
+    if (evmAddress) {
+      list.push({ address: evmAddress, vmType: "evm", connector: "evm" });
+    }
+    if (solanaAddress) {
+      list.push({
+        address: solanaAddress,
+        vmType: "svm",
+        connector: solanaWalletAdapter?.adapter.name ?? "Solana",
+        walletLogoUrl: solanaWalletAdapter?.adapter.icon,
+      });
+    }
+    return list;
+  }, [evmAddress, solanaAddress, solanaWalletAdapter]);
+
+  // The active signer for the current Sell chain (SVM adapter or viem).
+  const wallet = useMemo<AdaptedWallet | undefined>(() => {
+    if (fromIsSolana) {
+      if (!publicKey) return undefined;
+      const adapted = adaptSolanaWallet(
+        publicKey.toBase58(),
+        SOLANA_CHAIN_ID,
+        connection,
+        async (tx: VersionedTransaction, options?: SendOptions) => {
+          const signature = await sendTransaction(tx, connection, options);
+          return { signature };
+        }
+      );
+      // The SVM adapter has no getBalance; read SOL/SPL balances from the RPC.
+      return {
+        ...adapted,
+        getBalance: (_chainId, walletAddress, tokenAddress) =>
+          getSolanaBalance(connection, walletAddress, tokenAddress),
+      };
+    }
+    return walletClient ? adaptViemWallet(walletClient) : undefined;
+  }, [fromIsSolana, publicKey, walletClient, connection, sendTransaction]);
+
+  // Route the connect CTA to the modal matching the Sell chain's VM.
+  const handleConnectWallet = useCallback(() => {
+    if (fromIsSolana) setSolanaModalVisible(true);
+    else openConnectModal?.();
+  }, [fromIsSolana, openConnectModal, setSolanaModalVisible]);
+
+  // Connect a wallet for the chain being linked. RainbowKit holds one EVM wallet
+  // and disables openConnectModal once connected, so fall through to the Solana
+  // modal (or the EVM account modal when both VMs are already linked).
+  const handleLinkWallet = useCallback(
+    (params?: { chain?: RelayChain; direction?: "to" | "from" }) => {
+      if (params?.chain?.vmType === "svm") setSolanaModalVisible(true);
+      else if (openConnectModal) openConnectModal();
+      else if (!solanaAddress) setSolanaModalVisible(true);
+      else openAccountModal?.();
+    },
+    [openConnectModal, openAccountModal, solanaAddress, setSolanaModalVisible]
+  );
+
+  // Pull Relay's full chain list onto the shared client so the widget matches
+  // the live Relay app; fall back to the static config if the fetch fails.
   useEffect(() => {
     let active = true;
     configureDynamicChains()
@@ -138,18 +214,22 @@ export function RelaySwapPanel() {
         {ready && chainsReady ? (
           <SwapWidget
             wallet={wallet}
+            multiWalletSupportEnabled
+            linkedWallets={linkedWallets}
+            onLinkNewWallet={handleLinkWallet}
             fromToken={fromToken}
             setFromToken={setFromToken}
             toToken={toToken}
             setToToken={setToToken}
             defaultAmount={defaultAmount}
-            supportedWalletVMs={["evm"]}
-            onConnectWallet={() => openConnectModal?.()}
+            supportedWalletVMs={["evm", "svm"]}
+            onConnectWallet={handleConnectWallet}
             onSwapSuccess={() => {
               toast.success("Swap complete");
             }}
-            onSwapError={(message) => {
-              toast.error(message || "Swap failed");
+            onSwapError={(message, data) => {
+              // The widget surfaces its own failure message; just log details.
+              console.error("[relay] swap error:", message, data);
             }}
           />
         ) : (
