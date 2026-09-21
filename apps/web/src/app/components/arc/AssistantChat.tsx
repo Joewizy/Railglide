@@ -157,8 +157,8 @@ export function AssistantChat({ onLaunch }: Props) {
               <span style={{ fontSize: 13, fontWeight: 500 }}>Try saying</span>
             </span>
             <span className="muted" style={{ fontSize: 14, lineHeight: 1.5 }}>
-              &ldquo;Sell my PENGU for naira&rdquo; · &ldquo;Sell 200 USDC to
-              GTBank&rdquo; · &ldquo;Swap ETH to USDC on Base&rdquo;
+              &ldquo;Sell my meme token for naira&rdquo; · &ldquo;Sell 200 USDC to
+              my bank account&rdquo; · &ldquo;Swap ETH to USDC on Base&rdquo;
             </span>
           </div>
         )}
