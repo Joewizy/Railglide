@@ -159,6 +159,9 @@ export function CashoutFlow({
 }) {
   const { step, setStep, patchUrl } = useSwapFlowNav();
   const crOrderId = useSearchParams().get("crOrder");
+  // Read once and shared below — two live loadPendingLaunch() calls race under
+  // Strict Mode's double-invoke and can fall through to a stale saved draft.
+  const pendingLaunchRef = useRef(loadPendingLaunch());
   const [amount, setAmount] = useState("");
   const [token, setToken] = useState<(typeof TOKENS)[number]>("USDC");
   const [currency, setCurrency] = useState<string>("NGN");
@@ -258,7 +261,7 @@ export function CashoutFlow({
   // path seeds its own chain) and on the review step (its draft owns that).
   useEffect(() => {
     if (step === "review" || crOrderId) return;
-    if (loadPendingLaunch()?.flow === "cashout" || loadPendingRecipient())
+    if (pendingLaunchRef.current?.flow === "cashout" || loadPendingRecipient())
       return;
     const d = loadComposeDraft("cashout");
     if (!d) return;
@@ -300,7 +303,7 @@ export function CashoutFlow({
 
   // Seed fields from chat → cashout launch payload.
   useEffect(() => {
-    const launch = loadPendingLaunch();
+    const launch = pendingLaunchRef.current;
     if (!launch || launch.flow !== "cashout") return;
     if (launch.amount) setAmount(launch.amount);
     if (launch.currency) setCurrency(launch.currency);
