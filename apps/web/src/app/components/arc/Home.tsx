@@ -192,10 +192,10 @@ export function Home({
         </span>
         <span className="col" style={{ gap: 2, textAlign: "left", flex: 1 }}>
           <span style={{ fontSize: 15, fontWeight: 500 }}>
-            Describe it in your own words
+            Tell us what you want to do
           </span>
           <span className="muted" style={{ fontSize: 13 }}>
-            Tell Railglide what you want — it works out the route.
+            Try “cash out 100 USDC to my bank account.”
           </span>
         </span>
         <Icon.ArrowRight size={14} />
