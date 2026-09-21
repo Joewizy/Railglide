@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import type { ChatMessage, ChatReply, FlowLaunch, FlowSeed } from "@/assistant/types";
 import {
   buildAssistantSystemPrompt,
@@ -7,16 +7,15 @@ import {
 } from "@/assistant/productRules";
 import { fetchPaycrestUnitRate, type PaycrestFiat } from "@/rails/paycrest";
 
-const apiKey = process.env.OPENAI_API_KEY;
-const baseURL =
-  process.env.OPENAI_BASE_URL ?? "https://models.github.ai/inference";
-const model = process.env.OPENAI_MODEL ?? "openai/gpt-4o-mini";
+const apiKey = process.env.GEMINI_API_KEY;
+const primaryModel = "gemini-3.6-flash";
+const fallbackModel = "gemini-3.5-flash";
 
 if (!apiKey) {
-  console.warn("[chat] OPENAI_API_KEY is not set — /api/chat will return 500.");
+  console.error("[chat] GEMINI_API_KEY is not configured; chat requests will be unavailable.");
 }
 
-const client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
+const client = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const seedSchema = {
   type: "object",
@@ -44,43 +43,39 @@ const seedSchema = {
 } as const;
 
 const chatSchema = {
-  name: "railglide_chat_reply",
-  strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      message: {
-        type: "string",
-        description: "User-facing assistant reply — warm, specific, conversational.",
-      },
-      status: {
-        type: "string",
-        enum: ["clarifying", "ready", "unsupported"],
-      },
-      launch: {
-        type: ["object", "null"],
-        additionalProperties: false,
-        properties: {
-          flow: {
-            type: "string",
-            enum: ["cashout", "buy", "bridge"],
-          },
-          seed: seedSchema,
-        },
-        required: ["flow", "seed"],
-      },
-      plan: {
-        type: "array",
-        items: { type: "string" },
-      },
-      missing: {
-        type: "array",
-        items: { type: "string" },
-      },
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    message: {
+      type: "string",
+      description: "User-facing assistant reply — warm, specific, conversational.",
     },
-    required: ["message", "status", "launch", "plan", "missing"],
+    status: {
+      type: "string",
+      enum: ["clarifying", "ready", "unsupported"],
+    },
+    launch: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      properties: {
+        flow: {
+          type: "string",
+          enum: ["cashout", "buy", "bridge"],
+        },
+        seed: seedSchema,
+      },
+      required: ["flow", "seed"],
+    },
+    plan: {
+      type: "array",
+      items: { type: "string" },
+    },
+    missing: {
+      type: "array",
+      items: { type: "string" },
+    },
   },
+  required: ["message", "status", "launch", "plan", "missing"],
 } as const;
 
 type RawSeed = {
@@ -231,11 +226,28 @@ function fallbackReply(message: string): ChatReply {
   return { message, status: "clarifying", launch: undefined, plan: [], missing: [] };
 }
 
+function isTransientProviderError(error: unknown) {
+  const candidate = error as { status?: number; code?: number; message?: string };
+  return (
+    candidate.status === 429 ||
+    candidate.status === 500 ||
+    candidate.status === 503 ||
+    candidate.code === 429 ||
+    candidate.code === 500 ||
+    candidate.code === 503 ||
+    /\b(429|500|503)\b|UNAVAILABLE|overloaded|capacity/i.test(candidate.message || "")
+  );
+}
+
 export async function POST(req: NextRequest) {
   if (!client) {
+    console.error("[chat] Request rejected because GEMINI_API_KEY is not configured.");
     return NextResponse.json(
-      { error: "OPENAI_API_KEY not configured on the server." },
-      { status: 500 }
+      {
+        error:
+          "The assistant is taking a quick break. Please try again in a moment.",
+      },
+      { status: 503 }
     );
   }
 
@@ -266,29 +278,52 @@ export async function POST(req: NextRequest) {
       [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
     rates = await resolveRates(lastUser);
 
-    const completion = await client.chat.completions.create({
-      model,
-      temperature: 0.2,
-      max_tokens: 800,
-      messages: [
-        { role: "system", content: buildAssistantSystemPrompt() },
-        ...(rates
-          ? [{ role: "system" as const, content: rates.modelNote }]
-          : []),
-        ...messages.map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        })),
-      ],
-      response_format: { type: "json_schema", json_schema: chatSchema },
-    });
+    const systemInstruction = rates
+      ? `${buildAssistantSystemPrompt()}\n\n${rates.modelNote}`
+      : buildAssistantSystemPrompt();
+    const contents = messages.map((m) => ({
+      role: m.role === "assistant" ? ("model" as const) : ("user" as const),
+      parts: [{ text: m.content }],
+    }));
 
-    const content = completion.choices?.[0]?.message?.content;
+    // Try the primary model, then the fallback, each with a few retries on
+    // transient errors (rate limits, overload) — never on a real rejection.
+    let response: Awaited<ReturnType<typeof client.models.generateContent>> | undefined;
+    let lastError: unknown;
+    for (const modelName of [primaryModel, fallbackModel].filter(
+      (value, index, all) => all.indexOf(value) === index
+    )) {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          response = await client.models.generateContent({
+            model: modelName,
+            config: {
+              systemInstruction,
+              temperature: 0.2,
+              maxOutputTokens: 800,
+              responseMimeType: "application/json",
+              responseJsonSchema: chatSchema,
+            },
+            contents,
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!isTransientProviderError(error) || attempt === 3) break;
+          await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+        }
+      }
+      if (response) break;
+    }
 
-    // The model (GitHub Models) occasionally returns empty or truncated JSON,
-    // especially under load. Don't 500 on it — serve a graceful reply. If this
-    // was a rate question, answer it deterministically from the live rate we
-    // already fetched, so rates never depend on LLM reliability.
+    const content = response?.text;
+    if (!response) {
+      console.error("[chat] Gemini request failed after retries:", lastError);
+    }
+
+    // Model output can be empty/non-JSON, or the request can fail outright —
+    // never 500 on it; a rate question still gets a real answer from the
+    // live rate we already fetched.
     let raw: RawReply | null = null;
     if (content) {
       try {
@@ -313,32 +348,9 @@ export async function POST(req: NextRequest) {
     console.error("[chat] error:", err);
 
     // A rate question can still be answered from the live rate we fetched,
-    // even if the model call errored or timed out.
+    // even if something above threw (e.g. malformed request body).
     if (rates) {
       return NextResponse.json(fallbackReply(rates.fallback));
-    }
-
-    if (err instanceof OpenAI.APIError) {
-      // A connection/DNS/timeout failure has no HTTP status — the model host
-      // was unreachable, which is almost always a network blip, not the user.
-      if (err.status === undefined) {
-        return NextResponse.json(
-          {
-            error:
-              "The assistant is unreachable right now — check your connection and try again.",
-          },
-          { status: 503 }
-        );
-      }
-      // Any real API rejection (auth, rate limit, bad request). Specifics are
-      // logged above; we fix config, the user just retries.
-      return NextResponse.json(
-        {
-          error:
-            "The assistant is having trouble right now — please try again in a moment.",
-        },
-        { status: 502 }
-      );
     }
 
     return NextResponse.json(

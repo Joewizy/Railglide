@@ -39,10 +39,7 @@ The app does nothing until you add your own keys to `.env.local`. See the tables
 | Variable                        | Purpose                                |
 | ------------------------------- | -------------------------------------- |
 | `NEXT_PUBLIC_WALLET_CONNECT_ID` | WalletConnect project ID (RainbowKit)  |
-| `OPENAI_API_KEY`                | Conversational assistant (`/api/chat`) |
-
-
-`OPENAI_BASE_URL` and `OPENAI_MODEL` are optional; see `env.example` and `src/app/api/chat/route.ts`.
+| `GEMINI_API_KEY`                | Conversational assistant (`/api/chat`) — Gemini Flash |
 
 ### Rail API keys (enable as you integrate)
 
