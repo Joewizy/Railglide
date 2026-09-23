@@ -27,6 +27,9 @@ export function AssistantChat({ onLaunch }: Props) {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [failedMessages, setFailedMessages] = useState<ChatMessage[] | null>(
+    null
+  );
   const [lastReply, setLastReply] = useState<ChatReply | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -52,19 +55,21 @@ export function AssistantChat({ onLaunch }: Props) {
     ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
   }, [input]);
 
-  const send = async () => {
+  const send = async (retryMessages?: ChatMessage[]) => {
     const text = input.trim();
-    if (!text || thinking) return;
+    if ((!text && !retryMessages) || thinking) return;
 
-    const nextMessages: ChatMessage[] = [
+    const nextMessages: ChatMessage[] = retryMessages ?? [
       ...messages,
       { role: "user", content: text },
     ];
     setMessages(nextMessages);
-    setInput("");
+    if (!retryMessages) setInput("");
     setError(null);
+    setFailedMessages(null);
     setThinking(true);
     setLastReply(null);
+    storeChatState({ messages: nextMessages, lastReply: null });
 
     try {
       const res = await fetch("/api/chat", {
@@ -75,7 +80,7 @@ export function AssistantChat({ onLaunch }: Props) {
       const data = await res.json();
       if (!res.ok) {
         setError(data?.error || `Assistant error (${res.status})`);
-        setThinking(false);
+        setFailedMessages(nextMessages);
         return;
       }
 
@@ -89,6 +94,7 @@ export function AssistantChat({ onLaunch }: Props) {
       storeChatState({ messages: withReply, lastReply: reply });
     } catch {
       setError("Couldn't reach the assistant — check your connection.");
+      setFailedMessages(nextMessages);
     } finally {
       setThinking(false);
     }
@@ -98,6 +104,7 @@ export function AssistantChat({ onLaunch }: Props) {
     setMessages([]);
     setLastReply(null);
     setError(null);
+    setFailedMessages(null);
     setInput("");
     clearChatState();
   };
@@ -126,6 +133,7 @@ export function AssistantChat({ onLaunch }: Props) {
           <button
             className="btn btn-quiet btn-sm"
             onClick={startOver}
+            disabled={thinking}
             style={{ padding: "0 8px" }}
           >
             Start over
@@ -152,13 +160,16 @@ export function AssistantChat({ onLaunch }: Props) {
               border: "1px solid var(--line)",
             }}
           >
-            <span className="row center gap-2" style={{ color: "var(--accent)" }}>
+            <span
+              className="row center gap-2"
+              style={{ color: "var(--accent)" }}
+            >
               <Icon.Sparkle size={14} />
               <span style={{ fontSize: 13, fontWeight: 500 }}>Try saying</span>
             </span>
             <span className="muted" style={{ fontSize: 14, lineHeight: 1.5 }}>
-              &ldquo;Sell my meme token for naira&rdquo; · &ldquo;Sell 200 USDC to
-              my bank account&rdquo; · &ldquo;Swap ETH to USDC on Base&rdquo;
+              &ldquo;Sell my meme token for naira&rdquo; · &ldquo;Sell 200 USDC
+              to my bank account&rdquo; · &ldquo;Swap ETH to USDC on Base&rdquo;
             </span>
           </div>
         )}
@@ -214,6 +225,15 @@ export function AssistantChat({ onLaunch }: Props) {
             }}
           >
             {error}
+            {failedMessages && (
+              <button
+                className="btn btn-quiet btn-sm"
+                onClick={() => void send(failedMessages)}
+                disabled={thinking}
+              >
+                Try again
+              </button>
+            )}
           </div>
         )}
 
@@ -242,10 +262,7 @@ export function AssistantChat({ onLaunch }: Props) {
                 ))}
               </ol>
             )}
-            <button
-              className="btn btn-primary btn-fat"
-              onClick={handleLaunch}
-            >
+            <button className="btn btn-primary btn-fat" onClick={handleLaunch}>
               {FLOW_CTA[lastReply.launch.flow]} <Icon.ArrowRight />
             </button>
           </div>

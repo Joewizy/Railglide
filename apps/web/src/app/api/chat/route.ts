@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
-import type { ChatMessage, ChatReply, FlowLaunch, FlowSeed } from "@/assistant/types";
+import type {
+  ChatMessage,
+  ChatReply,
+  FlowLaunch,
+  FlowSeed,
+} from "@/assistant/types";
 import {
   buildAssistantSystemPrompt,
   isSettlementToken,
@@ -8,11 +13,15 @@ import {
 import { fetchPaycrestUnitRate, type PaycrestFiat } from "@/rails/paycrest";
 
 const apiKey = process.env.GEMINI_API_KEY;
-const primaryModel = "gemini-3.6-flash";
-const fallbackModel = "gemini-3.5-flash";
+const primaryModel = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
+
+export const maxDuration = 60;
 
 if (!apiKey) {
-  console.error("[chat] GEMINI_API_KEY is not configured; chat requests will be unavailable.");
+  console.error(
+    "[chat] GEMINI_API_KEY is not configured; chat requests will be unavailable."
+  );
 }
 
 const client = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -48,7 +57,8 @@ const chatSchema = {
   properties: {
     message: {
       type: "string",
-      description: "User-facing assistant reply — warm, specific, conversational.",
+      description:
+        "User-facing assistant reply — warm, specific, conversational.",
     },
     status: {
       type: "string",
@@ -97,6 +107,32 @@ type RawReply = {
   missing: string[];
 };
 
+function isRawReply(value: unknown): value is RawReply {
+  if (!value || typeof value !== "object") return false;
+  const raw = value as RawReply;
+  if (
+    typeof raw.message !== "string" ||
+    !raw.message.trim() ||
+    !["clarifying", "ready", "unsupported"].includes(raw.status) ||
+    !Array.isArray(raw.plan) ||
+    !raw.plan.every((v) => typeof v === "string") ||
+    !Array.isArray(raw.missing) ||
+    !raw.missing.every((v) => typeof v === "string")
+  )
+    return false;
+  if (raw.status !== "ready") return raw.launch === null;
+  if (!raw.launch || !["cashout", "buy", "bridge"].includes(raw.launch.flow))
+    return false;
+  const seed = raw.launch.seed;
+  return (
+    !!seed &&
+    typeof seed === "object" &&
+    seedSchema.required.every(
+      (key) => seed[key] === null || typeof seed[key] === "string"
+    )
+  );
+}
+
 function normaliseSeed(raw: RawSeed): FlowSeed {
   const pick = (v: string | null) => (v && v.trim() ? v.trim() : undefined);
   return {
@@ -129,7 +165,13 @@ function normaliseReply(raw: RawReply): ChatReply {
       isSettlementToken(launch.toToken)
     ) {
       const token = launch.fromToken;
-      launch = { ...launch, flow: "cashout", token, fromToken: undefined, toToken: undefined };
+      launch = {
+        ...launch,
+        flow: "cashout",
+        token,
+        fromToken: undefined,
+        toToken: undefined,
+      };
       plan = [];
       message = `You can cash out your ${token} directly — no swap needed. Let's set it up.`;
     }
@@ -223,25 +265,43 @@ async function resolveRates(
 
 /** A graceful, schema-valid reply for when the model output can't be used. */
 function fallbackReply(message: string): ChatReply {
-  return { message, status: "clarifying", launch: undefined, plan: [], missing: [] };
+  return {
+    message,
+    status: "clarifying",
+    launch: undefined,
+    plan: [],
+    missing: [],
+  };
 }
 
 function isTransientProviderError(error: unknown) {
-  const candidate = error as { status?: number; code?: number; message?: string };
+  const candidate = (error ?? {}) as {
+    status?: number;
+    code?: number;
+    message?: string;
+  };
   return (
-    candidate.status === 429 ||
-    candidate.status === 500 ||
-    candidate.status === 503 ||
-    candidate.code === 429 ||
-    candidate.code === 500 ||
-    candidate.code === 503 ||
-    /\b(429|500|503)\b|UNAVAILABLE|overloaded|capacity/i.test(candidate.message || "")
+    [408, 429, 500, 502, 503, 504].includes(
+      candidate.status ?? candidate.code ?? 0
+    ) ||
+    /\b(408|429|500|502|503|504)\b|UNAVAILABLE|overloaded|capacity|timeout|timed out|aborted/i.test(
+      candidate.message || ""
+    )
+  );
+}
+
+function assistantError(status: number, code: string, error: string) {
+  return NextResponse.json(
+    { error, code },
+    { status, headers: status === 503 ? { "Retry-After": "10" } : undefined }
   );
 }
 
 export async function POST(req: NextRequest) {
   if (!client) {
-    console.error("[chat] Request rejected because GEMINI_API_KEY is not configured.");
+    console.error(
+      "[chat] Request rejected because GEMINI_API_KEY is not configured."
+    );
     return NextResponse.json(
       {
         error:
@@ -288,16 +348,19 @@ export async function POST(req: NextRequest) {
 
     // Try the primary model, then the fallback, each with a few retries on
     // transient errors (rate limits, overload) — never on a real rejection.
-    let response: Awaited<ReturnType<typeof client.models.generateContent>> | undefined;
+    let response:
+      Awaited<ReturnType<typeof client.models.generateContent>> | undefined;
     let lastError: unknown;
     for (const modelName of [primaryModel, fallbackModel].filter(
       (value, index, all) => all.indexOf(value) === index
     )) {
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
           response = await client.models.generateContent({
             model: modelName,
             config: {
+              // Bound each attempt and avoid stacking SDK retries on ours.
+              httpOptions: { timeout: 8_000, retryOptions: { attempts: 1 } },
               systemInstruction,
               temperature: 0.2,
               maxOutputTokens: 800,
@@ -309,8 +372,17 @@ export async function POST(req: NextRequest) {
           break;
         } catch (error) {
           lastError = error;
-          if (!isTransientProviderError(error) || attempt === 3) break;
-          await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+          const transient = isTransientProviderError(error);
+          console.warn("[chat] Model attempt failed", {
+            model: modelName,
+            attempt,
+            status: (error as { status?: number } | null)?.status,
+            transient,
+          });
+          if (!transient || attempt === 2) break;
+          await new Promise((resolve) =>
+            setTimeout(resolve, 500 * 2 ** (attempt - 1) + Math.random() * 250)
+          );
         }
       }
       if (response) break;
@@ -319,26 +391,31 @@ export async function POST(req: NextRequest) {
     const content = response?.text;
     if (!response) {
       console.error("[chat] Gemini request failed after retries:", lastError);
+      if (rates) return NextResponse.json(fallbackReply(rates.fallback));
+      return assistantError(
+        503,
+        "ASSISTANT_UNAVAILABLE",
+        "The assistant is temporarily unavailable. Please try again in a moment."
+      );
     }
 
-    // Model output can be empty/non-JSON, or the request can fail outright —
-    // never 500 on it; a rate question still gets a real answer from the
-    // live rate we already fetched.
+    // Live rate data remains usable even when the model produces no answer.
     let raw: RawReply | null = null;
     if (content) {
       try {
-        raw = JSON.parse(content) as RawReply;
+        const parsed: unknown = JSON.parse(content);
+        if (isRawReply(parsed)) raw = parsed;
+        else console.error("[chat] Invalid model response schema");
       } catch {
         console.error("[chat] non-JSON model output:", content.slice(0, 200));
       }
     }
     if (!raw) {
-      return NextResponse.json(
-        rates
-          ? fallbackReply(rates.fallback)
-          : fallbackReply(
-              "Sorry, I didn't quite catch that — could you say it again?"
-            )
+      if (rates) return NextResponse.json(fallbackReply(rates.fallback));
+      return assistantError(
+        502,
+        "ASSISTANT_INVALID_RESPONSE",
+        "The assistant couldn't generate a response. Please try again."
       );
     }
     return NextResponse.json(normaliseReply(raw));
