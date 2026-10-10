@@ -369,7 +369,7 @@ export function BuyFlow({
           storeFlowDraft(buildDraft(quote, p));
         }}
         onBack={leaveReview}
-        onConfirm={(payout, destination) => {
+        onConfirm={(payout, destination, buyer) => {
           clearFlowDraft();
           clearComposeDraft("buy");
           patchUrl({ step: null });
@@ -377,6 +377,7 @@ export function BuyFlow({
             ...quote.exec,
             ...(payout ? { payout } : {}),
             ...(destination ? { recipient: destination } : {}),
+            ...(buyer ? { buyer } : {}),
           };
           onSubmit({ text: reviewText, quote: { ...quote, exec } });
         }}

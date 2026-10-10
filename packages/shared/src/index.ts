@@ -7,8 +7,10 @@
  *   - "@railglide/shared/network"          chain/token registry + resolvers
  *   - "@railglide/shared/types"            domain types (swap/quote/relay/…)
  *   - "@railglide/shared/assistant/types"  chat + flow types
+ *   - "@railglide/shared/kyc"              Buy (on-ramp) buyer details
  */
 
 export * from "./network";
 export * from "./types";
 export * from "./assistant/types";
+export * from "./kyc";

@@ -11,6 +11,17 @@ import { parseUnits } from "viem";
 import { Icon } from "./icons";
 import { AssistantChat } from "./AssistantChat";
 import { PaycrestOrderScreen } from "./PaycrestOrderScreen";
+import { BuyerDetailsForm } from "./BuyerDetailsForm";
+import {
+  checkBuyerDetails,
+  trimBuyerDetails,
+  type BuyerDetails,
+} from "@railglide/shared/kyc";
+import {
+  clearBuyerDetails,
+  loadBuyerDetails,
+  saveBuyerDetails,
+} from "@/lib/buyerDetails";
 import type { FlowLaunch } from "@/assistant/types";
 import {
   useCctp,
@@ -98,6 +109,8 @@ export type QuoteExec = {
   payout?: PayoutDetails | null;
   /** Off-ramp: EVM address refunds return to (filled in Review). */
   refundAddress?: string | null;
+  /** Paycrest on-ramp: buyer's date of birth + NIN or ID (filled in Review). */
+  buyer?: BuyerDetails | null;
   /** Chainrails on-ramp quote selected before order creation. */
   chainrailsRamp?: {
     provider: string;
@@ -426,7 +439,8 @@ export function ReviewScreen({
   onBack: () => void;
   onConfirm: (
     payout: PayoutDetails | null,
-    destinationAddress?: string
+    destinationAddress?: string,
+    buyer?: BuyerDetails
   ) => void;
   /** Restored after refresh when the guided flow draft includes payout fields. */
   initialPayout?: PayoutDetails;
@@ -473,6 +487,26 @@ export function ReviewScreen({
     ? isValidRampAddress(rampAddressKind, destination)
     : isRecipientAddressValid(destination, quote.exec.toChain);
 
+  // Paycrest Buy orders also need the buyer's details. Load the copy saved on
+  // this device after mount (localStorage isn't there during server render).
+  const buyCurrency = quote.exec.fiatCurrency ?? "";
+  const [buyer, setBuyer] = useState<BuyerDetails>({ birthDate: "" });
+  // On by default; turning it off forgets any copy saved in this browser.
+  const [rememberBuyer, setRememberBuyer] = useState(true);
+  const [buyerSaved, setBuyerSaved] = useState(false);
+  useEffect(() => {
+    if (!isPaycrestOnramp) return;
+    const saved = loadBuyerDetails();
+    if (saved) {
+      setBuyer(saved);
+      setBuyerSaved(true);
+    }
+  }, [isPaycrestOnramp]);
+  const buyerProblems = isPaycrestOnramp
+    ? checkBuyerDetails(buyCurrency, buyer)
+    : [];
+  const buyerReady = buyerProblems.length === 0;
+
   const payoutReady =
     !needsAccountDetails ||
     (!!payout.institution &&
@@ -485,7 +519,23 @@ export function ReviewScreen({
   const needsWallet = !needsWalletField;
   const walletReady = isConnected || !needsWallet;
   const canConfirm =
-    walletReady && payoutReady && (!needsWalletField || destinationValid);
+    walletReady &&
+    payoutReady &&
+    buyerReady &&
+    (!needsWalletField || destinationValid);
+
+  const confirm = () => {
+    let buyerToSend: BuyerDetails | undefined;
+    if (isPaycrestOnramp) {
+      buyerToSend = trimBuyerDetails(buyCurrency, buyer);
+      if (rememberBuyer) saveBuyerDetails(buyerToSend);
+    }
+    onConfirm(
+      needsAccountDetails ? payout : null,
+      needsWalletField ? destination.trim() : undefined,
+      buyerToSend
+    );
+  };
 
   // Once the account name resolves, show the confirmed recipient in the
   // headline instead of the raw account number / placeholder.
@@ -696,6 +746,28 @@ export function ReviewScreen({
               />
             </div>
           )}
+          {isPaycrestOnramp && (
+            <div>
+              <div className="row center gap-1" style={{ marginBottom: 12 }}>
+                <span className="eyebrow">Your details</span>
+                <InfoHint text="Needed for every purchase. Save them and they're filled in for you next time." />
+              </div>
+              <BuyerDetailsForm
+                currency={buyCurrency}
+                value={buyer}
+                onChange={setBuyer}
+                remember={rememberBuyer}
+                onRememberChange={(on) => {
+                  setRememberBuyer(on);
+                  if (!on) {
+                    clearBuyerDetails();
+                    setBuyerSaved(false);
+                  }
+                }}
+                saved={buyerSaved}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -752,11 +824,7 @@ export function ReviewScreen({
           !walletReady
             ? () => openConnectModal?.()
             : canConfirm
-              ? () =>
-                  onConfirm(
-                    needsAccountDetails ? payout : null,
-                    needsWalletField ? destination.trim() : undefined
-                  )
+              ? confirm
               : undefined
         }
       >
@@ -776,6 +844,8 @@ export function ReviewScreen({
           ) : (
             "Enter payout details to continue"
           )
+        ) : !buyerReady ? (
+          buyerProblems[0].replace(/\.$/, "")
         ) : needsWalletField ? (
           <>
             Confirm and continue <Icon.ArrowRight />
@@ -1712,6 +1782,15 @@ export function StatusScreen({
           );
           return;
         }
+        // Buyer details come from Review; a retry from History uses the copy
+        // saved on this device.
+        const buyer = exec.buyer ?? loadBuyerDetails();
+        if (!buyer || checkBuyerDetails(exec.fiatCurrency, buyer).length > 0) {
+          setBootError(
+            "Your details (date of birth and ID) are missing — go back and add them."
+          );
+          return;
+        }
 
         const amountIn =
           exec.fromToken === "USDC" || exec.fromToken === "USDT"
@@ -1741,6 +1820,7 @@ export function StatusScreen({
               accountIdentifier: exec.payout.accountIdentifier,
               accountName: exec.payout.accountName,
             },
+            buyer,
             recipientAddress: destination,
             reference: buildPaycrestReference("onramp", destination),
           })

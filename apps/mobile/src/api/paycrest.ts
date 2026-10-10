@@ -1,4 +1,5 @@
 // Paycrest endpoint wrappers → backend routes (server holds the API key).
+import type { BuyerDetails } from "@railglide/shared/kyc";
 import { apiFetch } from "./client";
 import type {
   PaycrestFiat,
@@ -76,6 +77,8 @@ export interface CreateOnrampBody {
   amountIn?: "fiat" | "crypto";
   fiatCurrency: PaycrestFiat;
   refundAccount: PaycrestRecipient;
+  /** Date of birth + NIN (or ID) — required on every Buy order. */
+  buyer: BuyerDetails;
   token: PaycrestToken;
   network: string;
   recipientAddress: `0x${string}`;

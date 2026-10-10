@@ -34,6 +34,17 @@ import {
   type RampDestination,
 } from "@/rails/chainrails";
 import { ChainrailsBuyFlow } from "./ChainrailsBuyFlow";
+import {
+  checkBuyerDetails,
+  trimBuyerDetails,
+  type BuyerDetails,
+} from "@railglide/shared/kyc";
+import { BuyerDetailsFields } from "@/components/BuyerDetailsFields";
+import {
+  clearBuyerDetails,
+  loadBuyerDetails,
+  saveBuyerDetails,
+} from "@/store/buyerDetails";
 import { ApiError } from "@/api/client";
 import {
   Field,
@@ -137,6 +148,21 @@ export function BuyScreen() {
   const [accountName, setAccountName] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [recipientError, setRecipientError] = useState<string | null>(null);
+
+  // Date of birth + NIN (or ID) — Paycrest needs them on every Buy order.
+  // Prefilled from the copy saved on this device.
+  const [buyer, setBuyer] = useState<BuyerDetails>({ birthDate: "" });
+  // On by default; turning it off forgets any copy saved on the device.
+  const [rememberBuyer, setRememberBuyer] = useState(true);
+  const [buyerSaved, setBuyerSaved] = useState(false);
+  useEffect(() => {
+    void loadBuyerDetails().then((saved) => {
+      if (!saved) return;
+      setBuyer(saved);
+      setBuyerSaved(true);
+    });
+  }, []);
+  const buyerProblems = checkBuyerDetails(currency, buyer);
 
   useEffect(() => () => setPendingLaunch(null), [setPendingLaunch]);
 
@@ -269,6 +295,9 @@ export function BuyScreen() {
 
   const createOrder = async () => {
     if (!institution || !accountName || !recipientValid) return;
+    if (buyerProblems.length > 0) return;
+    const buyerToSend = trimBuyerDetails(currency, buyer);
+    if (rememberBuyer) void saveBuyerDetails(buyerToSend);
     try {
       await onramp.onramp({
         toChain: chain,
@@ -280,6 +309,7 @@ export function BuyScreen() {
           accountIdentifier: account.trim(),
           accountName,
         },
+        buyer: buyerToSend,
         recipientAddress: recipient as `0x${string}`,
         reference: buildPaycrestReference("onramp", recipient),
       });
@@ -473,11 +503,36 @@ export function BuyScreen() {
             </>
           )}
 
+          {accountName && (
+            <BuyerDetailsFields
+              currency={currency}
+              value={buyer}
+              onChange={setBuyer}
+              remember={rememberBuyer}
+              onRememberChange={(on) => {
+                setRememberBuyer(on);
+                if (!on) {
+                  void clearBuyerDetails();
+                  setBuyerSaved(false);
+                }
+              }}
+              saved={buyerSaved}
+            />
+          )}
+          {accountName && buyerProblems.length > 0 && (
+            <Text style={f.estimate}>{buyerProblems[0]}</Text>
+          )}
+
           <View style={f.rowButtons}>
             <Secondary label="Back" onPress={() => setStep("compose")} />
             <Primary
               label="Review"
-              disabled={!accountName || !isConnected || !recipientValid}
+              disabled={
+                !accountName ||
+                !isConnected ||
+                !recipientValid ||
+                buyerProblems.length > 0
+              }
               onPress={() => setStep("review")}
             />
           </View>

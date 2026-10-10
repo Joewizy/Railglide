@@ -16,6 +16,7 @@
  */
 
 import type { ChainId } from "@/config/network";
+import type { BuyerDetails } from "@railglide/shared/kyc";
 
 /** Paycrest Sender API host. Auth is the `API-Key` request header. */
 export const PAYCREST_BASE_URL = "https://api.paycrest.io";
@@ -208,6 +209,8 @@ export interface PaycrestOnrampRequest {
   amountIn?: "fiat" | "crypto";
   fiatCurrency: PaycrestFiat;
   refundAccount: PaycrestRefundAccount;
+  /** Who is paying in — Paycrest requires it on every on-ramp order. */
+  buyer: BuyerDetails;
   token: PaycrestToken;
   network: string;
   recipientAddress: `0x${string}`;

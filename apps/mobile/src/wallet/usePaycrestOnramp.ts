@@ -19,6 +19,7 @@ import {
   type PaycrestRecipient,
   type PaycrestToken,
 } from "@/rails/paycrest";
+import type { BuyerDetails } from "@railglide/shared/kyc";
 import { createOnrampOrder, getOrder } from "@/api/paycrest";
 
 export type PaycrestOnrampStatus =
@@ -36,6 +37,8 @@ export interface PaycrestOnrampParams {
   amount: string;
   fiatCurrency: PaycrestFiat;
   refundAccount: PaycrestRecipient;
+  /** Date of birth + NIN (or ID) — required on every Buy order. */
+  buyer: BuyerDetails;
   recipientAddress: `0x${string}`;
   reference?: string;
 }
@@ -72,6 +75,7 @@ export function usePaycrestOnramp() {
         amount,
         fiatCurrency,
         refundAccount,
+        buyer,
         recipientAddress,
         reference,
       } = params;
@@ -105,6 +109,7 @@ export function usePaycrestOnramp() {
           amountIn: "fiat",
           fiatCurrency,
           refundAccount,
+          buyer,
           token,
           network,
           recipientAddress,

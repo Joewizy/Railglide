@@ -10,7 +10,8 @@
     ".": "./src/index.ts",
     "./network": "./src/network.ts",
     "./types": "./src/types/index.ts",
-    "./assistant/types": "./src/assistant/types.ts"
+    "./assistant/types": "./src/assistant/types.ts",
+    "./kyc": "./src/kyc.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

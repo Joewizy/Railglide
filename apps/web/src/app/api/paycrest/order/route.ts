@@ -10,6 +10,11 @@ import {
   walletFromPaycrestPayload,
   type PaycrestOrder,
 } from "@/rails/paycrest";
+import {
+  checkBuyerDetails,
+  toPaycrestKyc,
+  type BuyerDetails,
+} from "@railglide/shared/kyc";
 import { redis } from "@/lib/redis";
 import { upsertStoredOrder } from "@/lib/orderStore";
 
@@ -80,6 +85,22 @@ function friendlyPaycrestError(text: string): string | null {
   // rather than assuming "smaller".
   if (t.includes("no provider")) {
     return "No provider can fill an order this size right now. Try a different amount, or check back shortly.";
+  }
+  // Buy orders: the refund account's holder isn't the person in the KYC.
+  if (t.includes("refund account name does not match")) {
+    return "The refund bank account must be in your own name — the same person as the NIN. Use your own account and try again.";
+  }
+  // Buy orders: Paycrest rejected the buyer details (NIN, date of birth…).
+  // Paycrest lists each bad field by path, so name the ones we recognise.
+  if (t.includes("kyc")) {
+    const fields = [
+      t.includes("birthdate") && "date of birth",
+      t.includes("iddocument") && "NIN / ID number",
+      t.includes("phone") && "phone number",
+    ].filter(Boolean);
+    return fields.length > 0
+      ? `Please check your ${fields.join(", ")} and try again.`
+      : "We couldn't verify your details. Check your date of birth and ID numbers, then try again.";
   }
   return null;
 }
@@ -415,6 +436,14 @@ function buildOnrampBody(
     };
   }
 
+  // Paycrest needs to know who is paying in on every Buy order. The name comes
+  // from the verified refund account, so the two always match.
+  const buyer = body.buyer as BuyerDetails | undefined;
+  const buyerProblems = checkBuyerDetails(fiat, buyer);
+  if (buyerProblems.length > 0) {
+    return { error: buyerProblems.join(" ") };
+  }
+
   const resolvedAmountIn =
     amountIn === "crypto" || amountIn === "fiat" ? amountIn : "fiat";
 
@@ -440,6 +469,7 @@ function buildOnrampBody(
           accountIdentifier: refundAccount.accountIdentifier,
           accountName: refundAccount.accountName,
         },
+        kyc: toPaycrestKyc(fiat, refundAccount.accountName, buyer!),
       },
       destination: {
         type: "crypto",
