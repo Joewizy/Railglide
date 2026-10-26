@@ -359,8 +359,7 @@ export async function POST(req: NextRequest) {
           response = await client.models.generateContent({
             model: modelName,
             config: {
-              // Bound each attempt and avoid stacking SDK retries on ours.
-              httpOptions: { timeout: 8_000, retryOptions: { attempts: 1 } },
+              httpOptions: { timeout: 10_000, retryOptions: { attempts: 1 } },
               systemInstruction,
               temperature: 0.2,
               maxOutputTokens: 800,
