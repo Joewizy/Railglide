@@ -2,16 +2,9 @@
 // parts); hoist to @railglide/shared when unifying rail contracts.
 import type { ChainId } from "@railglide/shared/network";
 
-export const PAYCREST_FIAT = [
-  "NGN",
-  "KES",
-  "GHS",
-  "UGX",
-  "XOF",
-  "ZMW",
-  "TZS",
-  "ZAR",
-] as const;
+// Paycrest dropped GHS, XOF, ZMW and ZAR (Oct 2026). Check
+// GET https://api.paycrest.io/v1/currencies when in doubt. Mirrors web.
+export const PAYCREST_FIAT = ["NGN", "KES", "UGX", "TZS"] as const;
 
 export type PaycrestFiat = (typeof PAYCREST_FIAT)[number];
 
