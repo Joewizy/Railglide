@@ -127,6 +127,26 @@ export interface PaycrestOrder {
   updatedAt?: string;
 }
 
+/**
+ * What the user must send for an off-ramp order: Paycrest's amountToTransfer,
+ * else amount + senderFee + transactionFee. Never the bare `amount` — that
+ * leaves the order short by the fees. (Mirrors apps/web/src/rails/paycrest.ts.)
+ */
+export function paycrestAmountDue(
+  order: Pick<
+    PaycrestOrder,
+    "amount" | "amountToTransfer" | "senderFee" | "transactionFee"
+  >
+): string {
+  if (Number(order.amountToTransfer) > 0) return order.amountToTransfer!;
+  const total =
+    Number(order.amount ?? 0) +
+    Number(order.senderFee ?? 0) +
+    Number(order.transactionFee ?? 0);
+  // Round up at 6 decimals so we never send a hair short.
+  return String(Math.ceil(total * 1e6) / 1e6);
+}
+
 export type PaycrestOutcome = "success" | "failed" | "expired" | "pending";
 
 /** True once the provider has started paying out (on-ramp timeline → settling). */

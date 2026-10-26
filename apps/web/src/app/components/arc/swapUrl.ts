@@ -162,6 +162,8 @@ export type ComposeDraft = {
   chain?: string;
   /** ChainRails corridor chain, set when a non-Paycrest destination is picked. */
   crChain?: string;
+  /** Country picked from "More countries" (ChainRails currency), e.g. "IN". */
+  payCountry?: string;
 };
 
 type ComposeFlow = "buy" | "cashout";

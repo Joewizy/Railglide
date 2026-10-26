@@ -195,17 +195,8 @@ const FIAT_ALIASES: Record<string, PaycrestFiat> = {
   shillings: "KES",
   mpesa: "KES",
   "m-pesa": "KES",
-  ghs: "GHS",
-  cedi: "GHS",
-  cedis: "GHS",
   ugx: "UGX",
-  xof: "XOF",
-  cfa: "XOF",
-  zmw: "ZMW",
-  kwacha: "ZMW",
   tzs: "TZS",
-  zar: "ZAR",
-  rand: "ZAR",
 };
 
 const RATE_INTENT =

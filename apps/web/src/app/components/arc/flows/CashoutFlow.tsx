@@ -12,18 +12,28 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
-import { getChain, resolveChain, type ChainId } from "@/config/network";
+import {
+  DEFAULT_SETTLEMENT_CHAIN_ID,
+  getChain,
+  resolveChain,
+  type ChainId,
+} from "@/config/network";
 import {
   PAYCREST_SELL_CHAIN_IDS,
   PAYCREST_FIAT,
+  isPaycrestFiat,
   paycrestNetworkSlug,
 } from "@/rails/paycrest";
 import {
   CHAINRAILS_OFFRAMP_ENABLED,
   CHAINRAILS_RAMP_DESTINATIONS,
+  chainrailsDestinationFor,
+  type RampCountry,
   type RampDestination,
 } from "@/rails/chainrails";
+import { useRampCountries } from "@/hooks/useRampCountries";
 import { ChainrailsSellPanel } from "./ChainrailsSellPanel";
+import { amountBeforeFee } from "@/config/fees";
 import {
   getTrackedRampOrder,
   type TrackedRampOrder,
@@ -32,6 +42,7 @@ import { usePaycrestNetwork } from "@/hooks/usePaycrestNetwork";
 import { usePaycrestRate, useTokenBalance } from "@/hooks";
 import { fetchPaycrestRate } from "@/lib/paycrestRate";
 import {
+  countryFlag,
   fiatOptionLabel,
   formatFiat,
   formatNumber,
@@ -45,6 +56,7 @@ import {
   type IntentResponse,
   type PayoutDetails,
   type Quote,
+  InfoHint,
 } from "../SendScreen";
 import { Icon } from "../icons";
 import {
@@ -118,7 +130,7 @@ function SourceSelect({
       <select
         value={value}
         onChange={(e) => onSelect(e.target.value)}
-        style={{ ...style, paddingLeft: 42, flex: undefined }}
+        style={{ ...style, cursor: "pointer", paddingLeft: 42, flex: undefined }}
       >
         {PAYCREST_SELL_CHAIN_IDS.map((id) => (
           <option key={id} value={id}>
@@ -145,7 +157,7 @@ function rateLines(
   unitRate: number
 ) {
   return {
-    amount: `≈ ${formatFiat(currency, (Number(amount) || 0) * unitRate)}`,
+    amount: `≈ ${formatFiat(currency, amountBeforeFee(Number(amount) || 0) * unitRate)}`,
     rate: `${formatNumber(unitRate)} ${currency}/${token}`,
   };
 }
@@ -181,6 +193,45 @@ export function CashoutFlow({
   const [sourceTouched, setSourceTouched] = useState(false);
   // Non-Paycrest source → ChainRails off-ramp panel. Null on a Paycrest chain.
   const [crDest, setCrDest] = useState<RampDestination | null>(null);
+  // Payout country picked from "More countries" (e.g. "MW"). Those currencies
+  // go through ChainRails from the chosen chain. Null for Paycrest currencies.
+  const [payCountry, setPayCountry] = useState<string | null>(null);
+  // Countries ChainRails can pay out to whose currency Paycrest doesn't cover.
+  const { countries: sellCountries } = useRampCountries("off-ramp");
+  const moreCountries = CHAINRAILS_OFFRAMP_ENABLED
+    ? sellCountries.filter((c) => !isPaycrestFiat(c.currency.code))
+    : [];
+  const payDest =
+    payCountry === null
+      ? null
+      : (chainrailsDestinationFor(sourceChain) ??
+        chainrailsDestinationFor(DEFAULT_SETTLEMENT_CHAIN_ID));
+  const panelDest = crDest ?? payDest;
+
+  // "Recipient gets paid in": Paycrest currencies use this form; "cr:MW"
+  // style values (More countries) switch to the ChainRails panel.
+  const choosePayCurrency = (value: string) => {
+    if (!value.startsWith("cr:")) {
+      setCurrency(value);
+      setPayCountry(null);
+      return;
+    }
+    const country = sellCountries.find((c) => c.countryCode === value.slice(3));
+    if (!country) return;
+    setCurrency(country.currency.code);
+    setPayCountry(country.countryCode);
+  };
+
+  // Country changed inside the ChainRails panel. A Paycrest currency goes
+  // back to the normal form.
+  const choosePanelCountry = (country: RampCountry) => {
+    setCurrency(country.currency.code);
+    setPayCountry(
+      isPaycrestFiat(country.currency.code) && !crDest
+        ? null
+        : country.countryCode
+    );
+  };
   useEffect(() => {
     if (!sourceTouched && !crDest) setSourceChain(defaultSource);
   }, [defaultSource, sourceTouched, crDest]);
@@ -214,10 +265,12 @@ export function CashoutFlow({
   // locally as the user types so the Naira estimate updates with no extra API
   // calls. The exact rate locks when the order is created. Skipped on a
   // Chainrails source (that panel fetches its own rate).
-  const { rate: unitRate } = usePaycrestRate(currency, token, !crDest);
+  const { rate: unitRate } = usePaycrestRate(currency, token, !panelDest);
 
   const amountNum = Number(amount) || 0;
-  const estimate = unitRate && amountNum > 0 ? amountNum * unitRate : null;
+  // The recipient gets the amount after our fee × rate (800 → 796.02 × rate).
+  const estimate =
+    unitRate && amountNum > 0 ? amountBeforeFee(amountNum) * unitRate : null;
 
   // Balance is informational, not a gate: orders can be funded from any wallet,
   // so an amount above the connected balance still proceeds (with a heads-up).
@@ -266,7 +319,12 @@ export function CashoutFlow({
     const d = loadComposeDraft("cashout");
     if (!d) return;
     if (d.amount) setAmount(d.amount);
-    if (d.currency) setCurrency(d.currency);
+    // Skip currencies Paycrest has since dropped, unless saved with a
+    // ChainRails country.
+    if (d.currency && (isPaycrestFiat(d.currency) || d.payCountry)) {
+      setCurrency(d.currency);
+      if (d.payCountry !== undefined) setPayCountry(d.payCountry);
+    }
     if (d.token === "USDC" || d.token === "USDT") setToken(d.token);
     // Only ever restore a Paycrest chain — Sell always opens on the default
     // settlement chain (Base) unless the user explicitly picked another Paycrest
@@ -289,8 +347,9 @@ export function CashoutFlow({
       token,
       chain: sourceChain,
       crChain: crDest?.chainrailsChain,
+      payCountry: payCountry ?? undefined,
     });
-  }, [amount, currency, token, sourceChain, crDest, step, crOrderId]);
+  }, [amount, currency, token, sourceChain, crDest, payCountry, step, crOrderId]);
 
   // Prefill from a recipient picked on the Recipients screen ("Send").
   useEffect(() => {
@@ -462,7 +521,7 @@ export function CashoutFlow({
 
   // Non-Paycrest source → ChainRails off-ramp (manual deposit, dynamic banks).
   // The chain picker lives inside the panel so it stays one unified card.
-  if (crDest) {
+  if (panelDest) {
     return (
       <div className="col gap-6">
         {orderActive ? (
@@ -471,9 +530,13 @@ export function CashoutFlow({
           header
         )}
         <ChainrailsSellPanel
-          source={crDest}
+          source={panelDest}
           amount={amount}
           onAmountChange={setAmount}
+          countryCode={payCountry ?? undefined}
+          onCountryChange={payCountry === null ? undefined : choosePanelCountry}
+          token={token}
+          onTokenChange={setToken}
           backRef={panelBack}
           resumeOrderId={resume?.id}
           resumeFiatLabel={resume?.fiatLabel}
@@ -576,10 +639,11 @@ export function CashoutFlow({
               >
                 <span className="muted">
                   Balance on {getChain(sourceChain)?.name ?? sourceChain} ·{" "}
-                  <span className="font-mono tabular">
+                  <span className="tabular">
                     {formatToken(balanceFloored, token, 2)}
                   </span>
                 </span>
+                {balanceFloored > 0 && (
                 <button
                   type="button"
                   onClick={() => setAmount(String(balanceFloored))}
@@ -596,6 +660,7 @@ export function CashoutFlow({
                 >
                   Max
                 </button>
+                )}
               </div>
             )}
 
@@ -610,7 +675,7 @@ export function CashoutFlow({
                     ≈ {formatFiat(currency, estimate)}
                   </span>
                 )}
-                <span className="muted font-mono tabular">
+                <span className="muted tabular">
                   {estimate !== null
                     ? `(1 ${token} = ${formatNumber(unitRate)} ${currency})`
                     : `1 ${token} = ${formatNumber(unitRate)} ${currency}`}
@@ -619,8 +684,7 @@ export function CashoutFlow({
             )}
 
             {/* The figure above is an estimate at the live rate; Paycrest locks
-                the real rate when the order is created, and the locked rate is
-                shown on the funding screen before any crypto is sent. */}
+                the real rate when the order is created. */}
             {unitRate && estimate !== null && (
               <span
                 className="muted"
@@ -639,37 +703,29 @@ export function CashoutFlow({
                   lineHeight: 1.4,
                 }}
               >
-                That&apos;s more than this wallet holds — you can still continue
-                and send from another wallet, or top up first.
+                More than this wallet holds. You can still continue and pay
+                from another wallet.
               </span>
             )}
           </div>
         </Field>
 
-        <label className="col gap-2">
-          <span
-            className="font-mono"
-            style={{
-              fontSize: 10,
-              letterSpacing: 0.06,
-              color: "var(--fg-mute)",
-            }}
-          >
-            <span style={{ textTransform: "uppercase" }}>From</span> (The chain
-            your USDC/USDT is on.)
-          </span>
+        <Field
+          label="From"
+          hint="Select the chain where you have the USDC/USDT you're going to use."
+        >
           <SourceSelect
             sourceChain={sourceChain}
             crDest={crDest}
             onSelect={handleSourceSelect}
-            style={{ ...INPUT, cursor: "pointer" }}
+            style={INPUT}
           />
-        </label>
+        </Field>
 
         <Field label="Recipient gets paid in">
           <select
             value={currency}
-            onChange={(e) => setCurrency(e.target.value)}
+            onChange={(e) => choosePayCurrency(e.target.value)}
             style={{ ...INPUT, cursor: "pointer" }}
           >
             {PAYCREST_FIAT.map((c) => (
@@ -677,6 +733,15 @@ export function CashoutFlow({
                 {fiatOptionLabel(c)}
               </option>
             ))}
+            {moreCountries.length > 0 && (
+              <optgroup label="More countries">
+                {moreCountries.map((c) => (
+                  <option key={c.countryCode} value={`cr:${c.countryCode}`}>
+                    {countryFlag(c.countryCode)} {c.currency.code} — {c.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </Field>
 
@@ -711,7 +776,8 @@ export function CashoutFlow({
             </>
           ) : (
             <>
-              Continue <Icon.ArrowRight />
+              {canContinue ? "Continue" : "Enter an amount"}
+              {canContinue && <Icon.ArrowRight />}
             </>
           )}
         </button>
@@ -733,23 +799,22 @@ const INPUT: React.CSSProperties = {
 
 function Field({
   label,
+  hint,
   children,
 }: {
   label: string;
+  /** Optional help text behind an (i) icon next to the label. */
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
     <label className="col gap-2">
       <span
-        className="font-mono"
-        style={{
-          fontSize: 10,
-          letterSpacing: 0.06,
-          color: "var(--fg-mute)",
-          textTransform: "uppercase",
-        }}
+        className="row center gap-1"
+        style={{ fontSize: 13, color: "var(--fg-mute)" }}
       >
         {label}
+        {hint && <InfoHint text={hint} />}
       </span>
       {children}
     </label>

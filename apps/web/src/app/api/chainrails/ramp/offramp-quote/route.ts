@@ -31,6 +31,7 @@ async function probeOfframpLimit(
         cryptoAmount: Number(params.get("cryptoAmount")),
         sourceChain: params.get("sourceChain"),
         countryCode: params.get("countryCode"),
+        amountSymbol: params.get("amountSymbol"),
         senderAddress: "probe", // non-empty; the limit check needs no real one
       }),
     });
@@ -111,6 +112,8 @@ export async function POST(req: NextRequest) {
     cryptoAmount: String(cryptoAmount),
     sourceChain: body.sourceChain,
     countryCode: body.countryCode.toUpperCase(),
+    // Which stablecoin is being sold; ChainRails defaults to USDC.
+    amountSymbol: body.token === "USDT" ? "USDT" : "USDC",
   });
 
   try {
@@ -151,7 +154,10 @@ export async function POST(req: NextRequest) {
       // — could be under the min or over the max. The quotes endpoint won't say
       // which, so ask the order endpoint for the exact limit (e.g. "Minimum
       // amount to sell for NGN is ~5 USDC") and surface that when we can.
-      const limit = await probeOfframpLimit(apiKey, params);
+      // A rate preview (body.preview) just wants a number — skip the probe so
+      // browsing countries never pokes the order endpoint.
+      const limit =
+        body.preview === true ? null : await probeOfframpLimit(apiKey, params);
       return NextResponse.json(
         {
           error:

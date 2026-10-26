@@ -44,6 +44,7 @@ import {
   type PaycrestFiat,
   type PaycrestOrder,
   type PaycrestToken,
+  paycrestAmountDue,
 } from "@/rails/paycrest";
 import { ChainrailsStatus } from "./flows/ChainrailsStatus";
 import { isValidRampAddress, type RampAddressKind } from "@/rails/chainrails";
@@ -1477,8 +1478,8 @@ function offrampPhase(
   }
 
   const paid = Number(order.amountPaid ?? 0);
-  const amt = Number(order.amount ?? 0);
-  if (paid > 0 && amt > 0 && paid < amt) return "partial";
+  const due = Number(paycrestAmountDue(order));
+  if (paid > 0 && due > 0 && paid < due) return "partial";
 
   if (paycrestPayoutInFlight(order)) return "converting";
 
@@ -1945,8 +1946,9 @@ export function StatusScreen({
     : null;
   const payoutBank = exec?.payout?.institutionName ?? null;
   const payoutAcct = exec?.payout?.accountIdentifier ?? null;
+  // What the user sends = order amount + fees (Paycrest's amountToTransfer).
   const sendLabel = offrampOrder
-    ? formatStable(offrampOrder.amount, exec?.fromToken ?? "")
+    ? formatStable(paycrestAmountDue(offrampOrder), exec?.fromToken ?? "")
     : "";
   const fiatReceive =
     offrampOrder?.rate && offrampOrder.amount
@@ -1959,7 +1961,9 @@ export function StatusScreen({
 
   // Wallet balance of the token being sent → drives the funding branch.
   const balance = useTokenBalance(exec?.fromToken, exec?.fromChain);
-  const sendAmountNum = offrampOrder ? Number(offrampOrder.amount) : 0;
+  const sendAmountNum = offrampOrder
+    ? Number(paycrestAmountDue(offrampOrder))
+    : 0;
   const hasBalance =
     balance.formatted !== undefined &&
     sendAmountNum > 0 &&

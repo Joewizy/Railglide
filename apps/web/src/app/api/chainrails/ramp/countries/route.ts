@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 const API_URL = "https://api.chainrails.io/api/v1/ramp/countries";
 
@@ -10,7 +10,10 @@ const API_URL = "https://api.chainrails.io/api/v1/ramp/countries";
  * we wrap as `{ countries }` for the client. We proxy from the server to keep
  * the API key off the browser.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const query =
+    req.nextUrl.searchParams.get("type") === "off-ramp" ? "?type=off-ramp" : "";
+
   const apiKey = process.env.CHAINRAILS_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -20,7 +23,7 @@ export async function GET() {
   }
 
   try {
-    const upstream = await fetch(API_URL, {
+    const upstream = await fetch(`${API_URL}${query}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       cache: "no-store",
     });

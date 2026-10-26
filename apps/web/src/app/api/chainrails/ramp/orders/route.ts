@@ -107,7 +107,11 @@ export async function POST(req: NextRequest) {
     cryptoAmount,
     countryCode: String(body.countryCode).toUpperCase(),
     ...(isOfframp
-      ? { sourceChain: body.sourceChain, senderAddress: body.senderAddress }
+      ? {
+          sourceChain: body.sourceChain,
+          senderAddress: body.senderAddress,
+          amountSymbol: body.amountSymbol === "USDT" ? "USDT" : "USDC",
+        }
       : {
           destinationChain: body.destinationChain,
           recipientAddress: body.recipientAddress,

@@ -22,16 +22,9 @@ import type { BuyerDetails } from "@railglide/shared/kyc";
 export const PAYCREST_BASE_URL = "https://api.paycrest.io";
 
 /** Fiat currencies Paycrest supports for payout and on-ramp. */
-export const PAYCREST_FIAT = [
-  "NGN",
-  "KES",
-  "GHS",
-  "UGX",
-  "XOF",
-  "ZMW",
-  "TZS",
-  "ZAR",
-] as const;
+// Paycrest dropped GHS, XOF, ZMW and ZAR (Oct 2026) — those now go through
+// ChainRails. Check GET https://api.paycrest.io/v1/currencies when in doubt.
+export const PAYCREST_FIAT = ["NGN", "KES", "UGX", "TZS"] as const;
 
 export type PaycrestFiat = (typeof PAYCREST_FIAT)[number];
 
@@ -116,8 +109,6 @@ export const PAYCREST_NETWORK_SLUGS: Partial<Record<ChainId, string>> = {
   polygon: "polygon",
   bnb: "bnb-smart-chain",
   celo: "celo",
-  lisk: "lisk",
-  scroll: "scroll",
   starknet: "starknet",
 };
 
@@ -144,8 +135,6 @@ export const PAYCREST_SELL_CHAIN_IDS: ChainId[] = [
   "polygon",
   "bnb",
   "celo",
-  "lisk",
-  "scroll",
 ];
 
 /** Reverse of paycrestNetworkSlug: "base" → "base", "arbitrum-one" → "arbitrum". */
@@ -265,7 +254,8 @@ export interface PaycrestOrder {
   recipientName?: string;
   recipientInstitution?: string;
   recipientAccountIdentifier?: string;
-  /** On-ramp: exact fiat amount the user must transfer. */
+  /** Exact amount the user must send: fiat (on-ramp) or crypto (off-ramp).
+   *  Order amount + senderFee + transactionFee. */
   amountToTransfer?: string;
   depositCurrency?: string;
   /** Deadline for funding (off-ramp crypto or on-ramp fiat). */
@@ -290,6 +280,26 @@ export interface PaycrestOrder {
   /** Last update — settlement time once fulfilled. */
   updatedAt?: string;
   raw?: unknown;
+}
+
+/**
+ * What the user must send for an off-ramp order: Paycrest's amountToTransfer,
+ * else amount + senderFee + transactionFee. Never the bare `amount` — that
+ * leaves the order short by the fees.
+ */
+export function paycrestAmountDue(
+  order: Pick<
+    PaycrestOrder,
+    "amount" | "amountToTransfer" | "senderFee" | "transactionFee"
+  >
+): string {
+  if (Number(order.amountToTransfer) > 0) return order.amountToTransfer!;
+  const total =
+    Number(order.amount ?? 0) +
+    Number(order.senderFee ?? 0) +
+    Number(order.transactionFee ?? 0);
+  // Round up at 6 decimals so we never send a hair short.
+  return String(Math.ceil(total * 1e6) / 1e6);
 }
 
 /**
@@ -381,7 +391,6 @@ export function normalizePaycrestOrder(
         ? fiatRecipient.accountIdentifier
         : undefined,
     amountToTransfer:
-      direction === "onramp" &&
       typeof providerAccount?.amountToTransfer === "string"
         ? providerAccount.amountToTransfer
         : undefined,

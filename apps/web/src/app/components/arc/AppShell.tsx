@@ -658,7 +658,7 @@ function NavContent({
   setView: (v: View) => void;
 }) {
   const items: { id: View; label: string; icon: React.ReactNode }[] = [
-    { id: "send", label: "Send", icon: <Icon.Send /> },
+    { id: "send", label: "Home", icon: <Icon.Send /> },
     { id: "history", label: "History", icon: <Icon.History /> },
     { id: "recipients", label: "Recipients", icon: <Icon.Book /> },
   ];

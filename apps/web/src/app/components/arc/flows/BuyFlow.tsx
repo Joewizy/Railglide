@@ -12,10 +12,21 @@
 
 import React, { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { getChain, type ChainId } from "@/config/network";
-import { PAYCREST_CHAIN_IDS, PAYCREST_FIAT } from "@/rails/paycrest";
 import {
+  DEFAULT_SETTLEMENT_CHAIN_ID,
+  getChain,
+  type ChainId,
+} from "@/config/network";
+import {
+  PAYCREST_CHAIN_IDS,
+  PAYCREST_FIAT,
+  isPaycrestFiat,
+} from "@/rails/paycrest";
+import {
+  CHAINRAILS_EXTRA_FIAT,
   CHAINRAILS_RAMP_DESTINATIONS,
+  chainrailsDestinationFor,
+  type RampCountry,
   type RampDestination,
 } from "@/rails/chainrails";
 import { usePaycrestNetwork } from "@/hooks/usePaycrestNetwork";
@@ -130,7 +141,7 @@ function NetworkSelect({
             onPaycrest(v as ChainId);
           }
         }}
-        style={{ ...style, paddingLeft: 42, flex: undefined }}
+        style={{ ...style, cursor: "pointer", paddingLeft: 42, flex: undefined }}
       >
         {PAYCREST_CHAIN_IDS.map((id) => (
           <option key={id} value={id}>
@@ -166,6 +177,10 @@ export function BuyFlow({
   const [ready, setReady] = useState(step !== "review");
   // Non-Paycrest destination → ChainRails panel. Null while on a Paycrest chain.
   const [crDest, setCrDest] = useState<RampDestination | null>(null);
+  // Country picked from "More countries" (e.g. "IN"). Those currencies go
+  // through ChainRails on the chosen chain. "" = "Other country", not picked
+  // yet. Null while paying with a Paycrest currency.
+  const [payCountry, setPayCountry] = useState<string | null>(null);
 
   // Receiving USDC needs no wallet switch — it lands at your address on any
   // supported chain. So the destination is an explicit choice, pre-selected to
@@ -182,12 +197,61 @@ export function BuyFlow({
   // calls. The exact rate locks when the order is created.
   // Paycrest rate is irrelevant on a Chainrails chain (the panel fetches its
   // own), so don't request it then.
-  const { rate: unitRate } = usePaycrestRate(currency, token, !crDest);
+  const payDest =
+    payCountry === null
+      ? null
+      : (chainrailsDestinationFor(network) ??
+        chainrailsDestinationFor(DEFAULT_SETTLEMENT_CHAIN_ID));
+  const panelDest = crDest ?? payDest;
+  const { rate: unitRate } = usePaycrestRate(currency, token, !panelDest);
   const amountNum = Number(amount) || 0;
   const estimate = unitRate && amountNum > 0 ? amountNum / unitRate : null;
 
   const canContinue = Number(amount) > 0;
   const label = `Buy ${token} with ${amount} ${currency}`;
+
+  // "Paying with" picker: Paycrest currencies use this form; "cr:IN" style
+  // values (More countries) switch to the ChainRails panel.
+  const choosePayCurrency = (value: string) => {
+    if (!value.startsWith("cr:")) {
+      setCurrency(value);
+      setPayCountry(null);
+      return;
+    }
+    const countryCode = value.slice(3);
+    const extra = CHAINRAILS_EXTRA_FIAT.find(
+      (f) => f.countryCode === countryCode
+    );
+    if (extra) setCurrency(extra.code);
+    setPayCountry(countryCode);
+    setToken("USDC"); // ChainRails only delivers USDC
+  };
+
+  // Country changed inside the ChainRails panel. A Paycrest currency goes
+  // back to the normal form.
+  const choosePanelCountry = (country: RampCountry) => {
+    const code = country.currency.code;
+    if (isPaycrestFiat(code) && !crDest) {
+      setCurrency(code);
+      setPayCountry(null);
+      return;
+    }
+    setCurrency(code);
+    setPayCountry(country.countryCode);
+  };
+
+  // Restore a saved currency, including the pinned ChainRails ones.
+  const restoreCurrency = (code: string) => {
+    const extra = CHAINRAILS_EXTRA_FIAT.find(
+      (f) => f.code === code.toUpperCase()
+    );
+    if (extra) {
+      setCurrency(extra.code);
+      setPayCountry(extra.countryCode);
+    } else if (isPaycrestFiat(code)) {
+      setCurrency(code.toUpperCase());
+    }
+  };
 
   const selectNetwork = (id: ChainId) => {
     setNetworkTouched(true);
@@ -229,7 +293,8 @@ export function BuyFlow({
     const d = loadComposeDraft("buy");
     if (!d) return;
     if (d.amount) setAmount(d.amount);
-    if (d.currency) setCurrency(d.currency);
+    if (d.currency) restoreCurrency(d.currency);
+    if (d.payCountry !== undefined) setPayCountry(d.payCountry);
     if (d.token === "USDC" || d.token === "USDT") setToken(d.token);
     if (d.crChain) {
       const dest = CHAINRAILS_RAMP_DESTINATIONS.find(
@@ -247,7 +312,7 @@ export function BuyFlow({
     const launch = loadPendingLaunch();
     if (!launch || launch.flow !== "buy") return;
     if (launch.amount) setAmount(launch.amount);
-    if (launch.currency) setCurrency(launch.currency);
+    if (launch.currency) restoreCurrency(launch.currency);
     if (launch.token === "USDC" || launch.token === "USDT") {
       setToken(launch.token);
     }
@@ -264,8 +329,9 @@ export function BuyFlow({
       token,
       chain: network,
       crChain: crDest?.chainrailsChain,
+      payCountry: payCountry ?? undefined,
     });
-  }, [amount, currency, token, network, crDest, step]);
+  }, [amount, currency, token, network, crDest, payCountry, step]);
 
   const refreshRate = async (draft: FlowDraft) => {
     const draftToken = draft.token ?? "USDC";
@@ -410,15 +476,17 @@ export function BuyFlow({
     </header>
   );
 
-  // Non-Paycrest destination → ChainRails panel (address only, no bank fields).
-  if (crDest) {
+  // ChainRails chain or ChainRails-only currency → ChainRails panel.
+  if (panelDest) {
     return (
       <div className="col gap-6">
         {header}
         <ChainrailsBuyPanel
-          destination={crDest}
+          destination={panelDest}
           amount={amount}
           onAmountChange={setAmount}
+          countryCode={payCountry ?? undefined}
+          onCountryChange={payCountry === null ? undefined : choosePanelCountry}
           onQuote={setQuote}
           networkSelect={
             <NetworkSelect
@@ -441,17 +509,7 @@ export function BuyFlow({
 
       <div className="card col gap-5" style={{ padding: 20 }}>
         <label className="col gap-2">
-          <span
-            className="font-mono"
-            style={{
-              fontSize: 10,
-              letterSpacing: 0.06,
-              color: "var(--fg-mute)",
-              textTransform: "uppercase",
-            }}
-          >
-            You pay
-          </span>
+          <span style={{ fontSize: 13, color: "var(--fg-mute)" }}>You pay</span>
           <PrefixedAmountInput
             amount={amount}
             onAmountChange={setAmount}
@@ -467,7 +525,7 @@ export function BuyFlow({
                   You receive ≈ {formatToken(estimate, token, 2)}
                 </span>
               )}
-              <span className="muted font-mono tabular">
+              <span className="muted tabular">
                 {estimate !== null
                   ? `(1 ${token} = ${formatNumber(unitRate)} ${currency})`
                   : `1 ${token} = ${formatNumber(unitRate)} ${currency}`}
@@ -485,20 +543,12 @@ export function BuyFlow({
         </label>
 
         <label className="col gap-2">
-          <span
-            className="font-mono"
-            style={{
-              fontSize: 10,
-              letterSpacing: 0.06,
-              color: "var(--fg-mute)",
-              textTransform: "uppercase",
-            }}
-          >
+          <span style={{ fontSize: 13, color: "var(--fg-mute)" }}>
             Paying with
           </span>
           <select
             value={currency}
-            onChange={(e) => setCurrency(e.target.value)}
+            onChange={(e) => choosePayCurrency(e.target.value)}
             style={{ ...INPUT, cursor: "pointer" }}
           >
             {PAYCREST_FIAT.map((c) => (
@@ -506,21 +556,23 @@ export function BuyFlow({
                 {fiatOptionLabel(c)}
               </option>
             ))}
+            <optgroup label="More countries">
+              {CHAINRAILS_EXTRA_FIAT.map((f) => (
+                <option key={f.code} value={`cr:${f.countryCode}`}>
+                  {fiatOptionLabel(f.code)}
+                </option>
+              ))}
+              <option value="cr:">🌍  Other country…</option>
+            </optgroup>
           </select>
         </label>
 
         <label className="col gap-2">
           <span
             className="row center"
-            style={{
-              gap: 6,
-              fontSize: 10,
-              letterSpacing: 0.06,
-              color: "var(--fg-mute)",
-              textTransform: "uppercase",
-            }}
+            style={{ gap: 6, fontSize: 13, color: "var(--fg-mute)" }}
           >
-            <span className="font-mono">Receive</span>
+            <span>Receive on</span>
             <span
               style={{ position: "relative", display: "inline-flex" }}
               onMouseEnter={() => setShowNetworkInfo(true)}
@@ -665,7 +717,8 @@ export function BuyFlow({
             </>
           ) : (
             <>
-              Continue <Icon.ArrowRight />
+              {canContinue ? "Continue" : "Enter an amount"}
+              {canContinue && <Icon.ArrowRight />}
             </>
           )}
         </button>

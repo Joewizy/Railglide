@@ -16,8 +16,14 @@
  */
 
 import React, { useEffect, useState } from "react";
-import { formatNumber, formatToken } from "@/utils";
-import { type RampDestination } from "@/rails/chainrails";
+import { countryFlag, formatNumber, formatToken } from "@/utils";
+import {
+  isBelowRampMinimum,
+  rampMinimum,
+  type RampCountry,
+  type RampDestination,
+} from "@/rails/chainrails";
+import { useRampCountries } from "@/hooks/useRampCountries";
 import { type PaycrestInstitution } from "@/rails/paycrest";
 import type { TokenSymbol } from "@/config/network";
 import { PrefixedAmountInput } from "./PrefixedAmountInput";
@@ -29,16 +35,6 @@ import {
   loadChainrailsRampDraft,
   storeChainrailsRampDraft,
 } from "../swapUrl";
-
-type Country = {
-  countryCode: string;
-  name: string;
-  currency: { code: string; name: string; symbol: string; minAmount: number };
-};
-
-// Cache the country list for the session so switching chains (which remounts
-// this panel) doesn't re-flash a blank country / currency while it refetches.
-let COUNTRIES_CACHE: Country[] = [];
 
 type FieldOption = { label: string; value: string };
 type FieldSpec = {
@@ -76,6 +72,19 @@ function quoteRate(q: RampQuote): number {
   return q.exchangeRate ?? q.exchangeRatePerUSD ?? 0;
 }
 
+/**
+ * The quote to use: the recommended one if it has a real price, otherwise the
+ * first one that does. Some providers (e.g. PeerPay for INR) come back as
+ * "recommended" with a 0 rate and 0 amount.
+ */
+function pickQuote(data: {
+  recommended?: RampQuote | null;
+  quotes?: RampQuote[];
+}): RampQuote | undefined {
+  const all = [data.recommended, ...(data.quotes ?? [])];
+  return all.find((q): q is RampQuote => !!q && quoteRate(q) > 0);
+}
+
 /** FONBNK-style provider fields the order needs (bank dropdown, phone, account). */
 function requiredFieldsOf(q: RampQuote | undefined): FieldSpec[] {
   return q?.paymentChannels?.[0]?.directTransferDetails?.fieldsRequired ?? [];
@@ -91,6 +100,8 @@ export function ChainrailsBuyPanel({
   networkSelect,
   amount,
   onAmountChange,
+  countryCode: chosenCountry,
+  onCountryChange,
 }: {
   destination: RampDestination;
   /** Hand the built quote up so the shared ReviewScreen renders the confirm. */
@@ -101,12 +112,25 @@ export function ChainrailsBuyPanel({
    *  between the Paycrest form and this panel. */
   amount: string;
   onAmountChange: (v: string) => void;
+  /** Set when the parent's currency picker chose the country (e.g. India).
+   *  "" means "Other country" — the user still has to pick one here. */
+  countryCode?: string;
+  onCountryChange?: (country: RampCountry) => void;
 }) {
-  const [countries, setCountries] = useState<Country[]>(COUNTRIES_CACHE);
-  const [countryCode, setCountryCode] = useState("NG");
+  const {
+    countries,
+    loading,
+    error: countriesError,
+  } = useRampCountries("on-ramp");
+  const [ownCountry, setOwnCountry] = useState("NG");
+  const countryCode = chosenCountry ?? ownCountry;
+  const setCountryCode = (code: string) => {
+    const next = countries.find((c) => c.countryCode === code);
+    if (onCountryChange && next) onCountryChange(next);
+    else setOwnCountry(code);
+  };
   const [unitRate, setUnitRate] = useState<number | null>(null); // fiat per 1 USDC
   const [rateLoading, setRateLoading] = useState(false);
-  const [loading, setLoading] = useState(COUNTRIES_CACHE.length === 0);
   const [quoting, setQuoting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // FONBNK on-ramp requires phone/bank/account to create the order; the fields
@@ -137,7 +161,7 @@ export function ChainrailsBuyPanel({
     if (!d) return;
     // Amount is owned by the parent (shared with the Paycrest form) so it carries
     // across a chain switch — the per-chain draft only restores country + fields.
-    if (d.countryCode) setCountryCode(d.countryCode);
+    if (d.countryCode) setOwnCountry(d.countryCode);
     if (d.fields) setFieldValues(d.fields);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination.chainrailsChain]);
@@ -151,31 +175,11 @@ export function ChainrailsBuyPanel({
     });
   }, [destination.chainrailsChain, amount, countryCode, fieldValues]);
 
+  // Fall back to the first country if ours isn't in the list.
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/chainrails/ramp/countries")
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "Couldn't load countries.");
-        if (cancelled) return;
-        const next = (data.countries ?? []) as Country[];
-        COUNTRIES_CACHE = next;
-        setCountries(next);
-        if (!next.some((c) => c.countryCode === "NG") && next[0])
-          setCountryCode(next[0].countryCode);
-      })
-      .catch(
-        (err) =>
-          !cancelled &&
-          setError(
-            err instanceof Error ? err.message : "Couldn't load countries."
-          )
-      )
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (countries.length && !countries.some((c) => c.countryCode === ownCountry))
+      setOwnCountry(countries[0].countryCode);
+  }, [countries, ownCountry]);
 
   const country = countries.find((c) => c.countryCode === countryCode);
 
@@ -183,6 +187,8 @@ export function ChainrailsBuyPanel({
   // dropdown (value = Paycrest institution code) rather than a raw code box.
   const refundCurrency = country?.currency.code;
   useEffect(() => {
+    // Drop the previous country's banks so they can't linger if this fails.
+    setRefundBanks([]);
     if (!refundCurrency) return;
     let cancelled = false;
     fetch(`/api/paycrest/institutions?currency=${encodeURIComponent(refundCurrency)}`)
@@ -252,13 +258,17 @@ export function ChainrailsBuyPanel({
     if (!country) return;
     let cancelled = false;
     setUnitRate(null);
+    // Each provider asks for different fields (INR asks for none) — don't
+    // carry the last country's fields over while this one loads.
+    setFields([]);
     setRateLoading(true);
     fetch("/api/chainrails/ramp/quote", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         fiatCurrency: country.currency.code,
-        cryptoAmount: RATE_PROBE_CRYPTO,
+        // Must clear the corridor minimum or the quote is rejected (INR: 13).
+        cryptoAmount: Math.max(RATE_PROBE_CRYPTO, country.currency.minAmount),
         destinationChain: destination.chainrailsChain,
         countryCode,
       }),
@@ -266,9 +276,8 @@ export function ChainrailsBuyPanel({
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok || cancelled) return;
-        const q = (data.recommended ?? data.quotes?.[0]) as
-          RampQuote | undefined;
-        if (q && quoteRate(q) > 0) setUnitRate(quoteRate(q));
+        const q = pickQuote(data);
+        if (q) setUnitRate(quoteRate(q));
         // Learn which provider fields the order needs + seed enum defaults.
         const req = requiredFieldsOf(q);
         setFields(req);
@@ -291,8 +300,8 @@ export function ChainrailsBuyPanel({
   const fiatAmount = Number(amount);
   const estimateUsdc =
     unitRate && fiatAmount > 0 ? fiatAmount / unitRate : null;
-  const belowMin =
-    !!country && fiatAmount > 0 && fiatAmount < country.currency.minAmount;
+  const belowMin = isBelowRampMinimum(country, estimateUsdc);
+  const minimum = country ? rampMinimum(country, unitRate) : null;
   const fieldsComplete = fields.every(
     (f) => !f.required || (fieldValues[f.key]?.trim()?.length ?? 0) > 0
   );
@@ -305,7 +314,7 @@ export function ChainrailsBuyPanel({
     fieldsComplete &&
     emailValid;
 
-  const buildQuote = (r: RampQuote, c: Country): Quote => ({
+  const buildQuote = (r: RampQuote, c: RampCountry): Quote => ({
     from: { token: r.fiatCurrency, chain: c.name, amount: r.fiatAmount },
     to: {
       kind: "Wallet",
@@ -379,8 +388,7 @@ export function ChainrailsBuyPanel({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Couldn't get a quote.");
-      const selected = (data.recommended ?? data.quotes?.[0]) as
-        RampQuote | undefined;
+      const selected = pickQuote(data);
       if (!selected)
         throw new Error("No provider can quote this purchase right now.");
       clearChainrailsRampDraft(destination.chainrailsChain);
@@ -395,7 +403,7 @@ export function ChainrailsBuyPanel({
   return (
     <div className="card col gap-5" style={{ padding: 20 }}>
       <label className="col gap-2">
-        <span className="font-mono" style={LABEL}>
+        <span style={LABEL}>
           You pay
         </span>
         <PrefixedAmountInput
@@ -433,7 +441,7 @@ export function ChainrailsBuyPanel({
       </label>
 
       <label className="col gap-2">
-        <span className="font-mono" style={LABEL}>
+        <span style={LABEL}>
           Paying with
         </span>
         <select
@@ -442,16 +450,21 @@ export function ChainrailsBuyPanel({
           disabled={loading}
           style={INPUT}
         >
+          {!country && (
+            <option value="" disabled>
+              Choose your country…
+            </option>
+          )}
           {countries.map((c) => (
             <option key={c.countryCode} value={c.countryCode}>
-              {c.name} · {c.currency.code}
+              {countryFlag(c.countryCode)} {c.name} · {c.currency.code}
             </option>
           ))}
         </select>
       </label>
 
       <label className="col gap-2">
-        <span className="font-mono" style={LABEL}>
+        <span style={LABEL}>
           Receive
         </span>
         {networkSelect}
@@ -479,7 +492,7 @@ export function ChainrailsBuyPanel({
           const needsManual = ready && !verifying && !!verifyError;
           return (
             <div key={f.key} className="col gap-2">
-              <span className="font-mono" style={LABEL}>
+              <span style={LABEL}>
                 Refund account name
               </span>
               {needsManual ? (
@@ -513,7 +526,7 @@ export function ChainrailsBuyPanel({
 
         return (
           <label key={f.key} className="col gap-2">
-            <span className="font-mono" style={LABEL}>
+            <span style={LABEL}>
               {isRefundBank ? "Refund bank" : f.label}
             </span>
             {isRefundBank && refundBanks.length > 0 ? (
@@ -565,7 +578,7 @@ export function ChainrailsBuyPanel({
       {/* Asked once; afterwards it's remembered on-device and this is hidden. */}
       {askEmail && (
         <label className="col gap-2">
-          <span className="font-mono" style={LABEL}>
+          <span style={LABEL}>
             Email (for KYC &amp; receipts)
           </span>
           <input
@@ -578,13 +591,15 @@ export function ChainrailsBuyPanel({
         </label>
       )}
 
-      {belowMin && country && (
+      {belowMin && country && minimum && (
         <span style={{ fontSize: 12, color: "var(--pend)" }}>
-          Minimum is {formatNumber(country.currency.minAmount)}{" "}
-          {country.currency.code}.
+          Minimum is
+          {minimum.fiat !== null &&
+            ` about ${country.currency.symbol}${formatNumber(minimum.fiat)}`}{" "}
+          ({minimum.usdc} USDC).
         </span>
       )}
-      {error && (
+      {(error ?? countriesError) && (
         <div
           style={{
             padding: "12px 14px",
@@ -594,7 +609,7 @@ export function ChainrailsBuyPanel({
             fontSize: 13,
           }}
         >
-          {error}
+          {error ?? countriesError}
         </div>
       )}
 
@@ -639,8 +654,6 @@ const INPUT: React.CSSProperties = {
 
 // Matches the Paycrest buy card's field labels.
 const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  letterSpacing: 0.06,
+  fontSize: 13,
   color: "var(--fg-mute)",
-  textTransform: "uppercase",
 };

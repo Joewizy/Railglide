@@ -17,7 +17,7 @@ import {
   parsePhoneNumberFromString,
   type CountryCode,
 } from "libphonenumber-js";
-import type { ChainId } from "@/config/network";
+import { getChain, type ChainId } from "@/config/network";
 
 /**
  * App ChainId → Chainrails chain enum.
@@ -136,6 +136,74 @@ export const CHAINRAILS_RAMP_DESTINATIONS: RampDestination[] = [
     chainId: null,
   },
 ];
+
+/** A country from ChainRails' live ramp catalogue. */
+export type RampCountry = {
+  countryCode: string;
+  name: string;
+  /** minAmount is in USDC for both Buy and Sell (INR's 13 = 13 USDC). */
+  currency: { code: string; name: string; symbol: string; minAmount: number };
+};
+
+/**
+ * A country's minimum order, in USDC and (with a live rate) in local money.
+ * The one place Buy and Sell work this out, so they always agree.
+ */
+export function rampMinimum(
+  country: RampCountry,
+  unitRate: number | null
+): { usdc: number; fiat: number | null } {
+  const usdc = country.currency.minAmount;
+  return { usdc, fiat: unitRate ? Math.ceil(usdc * unitRate) : null };
+}
+
+/** True when a USDC amount is under the country's minimum. */
+export function isBelowRampMinimum(
+  country: RampCountry | undefined,
+  usdcAmount: number | null
+): boolean {
+  return (
+    !!country &&
+    usdcAmount !== null &&
+    usdcAmount > 0 &&
+    usdcAmount < country.currency.minAmount
+  );
+}
+
+/**
+ * Pay currencies Paycrest doesn't take that we offer through ChainRails. They
+ * sit pinned under Paycrest's list in the Buy currency picker.
+ */
+export const CHAINRAILS_EXTRA_FIAT = [
+  { code: "INR", countryCode: "IN" },
+  { code: "MWK", countryCode: "MW" },
+  // Dropped by Paycrest in Oct 2026; ChainRails still sells to these.
+  { code: "GHS", countryCode: "GH" },
+  { code: "ZMW", countryCode: "ZM" },
+  { code: "ZAR", countryCode: "ZA" },
+] as const;
+
+/**
+ * ChainRails destination for an app chain (e.g. Base), so a ChainRails-only
+ * currency like INR can still land on the chain the user picked. Null when
+ * ChainRails can't deliver there.
+ */
+export function chainrailsDestinationFor(
+  chainId: ChainId
+): RampDestination | null {
+  const chainrailsChain = CHAINRAILS_CHAIN[chainId];
+  if (!chainrailsChain) return null;
+  const known = CHAINRAILS_RAMP_DESTINATIONS.find(
+    (d) => d.chainrailsChain === chainrailsChain
+  );
+  if (known) return known;
+  return {
+    chainrailsChain,
+    label: getChain(chainId)?.name ?? chainId,
+    addressKind: chainId.startsWith("starknet") ? "starknet" : "evm",
+    chainId,
+  };
+}
 
 /**
  * Block-explorer URL for a ramp order's on-chain delivery tx, or null when we

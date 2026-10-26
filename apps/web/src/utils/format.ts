@@ -15,6 +15,8 @@ export const FIAT_SYMBOLS: Record<string, string> = {
   ZMW: "ZK",
   TZS: "TSh",
   ZAR: "R",
+  INR: "₹",
+  MWK: "MK",
 };
 
 /** Full names for the supported payout currencies. */
@@ -27,6 +29,8 @@ export const FIAT_NAMES: Record<string, string> = {
   ZMW: "Zambian Kwacha",
   TZS: "Tanzanian Shilling",
   ZAR: "South African Rand",
+  INR: "Indian Rupee",
+  MWK: "Malawian Kwacha",
 };
 
 /** Flag emoji per supported payout currency (multi-country regions omitted). */
@@ -38,7 +42,16 @@ const FIAT_FLAGS: Record<string, string> = {
   ZMW: "🇿🇲",
   TZS: "🇹🇿",
   ZAR: "🇿🇦",
+  INR: "🇮🇳",
+  MWK: "🇲🇼",
 };
+
+/** Flag emoji for a two-letter country code, e.g. "IN" → "🇮🇳". */
+export function countryFlag(countryCode: string): string {
+  return [...countryCode.toUpperCase()]
+    .map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65))
+    .join("");
+}
 
 /** Dropdown label for a currency, e.g. "🇳🇬  NGN — Nigerian Naira". */
 export function fiatOptionLabel(code: string): string {
@@ -59,6 +72,8 @@ export const FIAT_SHORT_NAMES: Record<string, string> = {
   ZMW: "Kwacha",
   TZS: "Tanzanian Shilling",
   ZAR: "Rand",
+  INR: "Rupee",
+  MWK: "Malawian Kwacha",
 };
 
 /** Inline currency label, e.g. "Naira (NGN)" (falls back to the code). */

@@ -40,6 +40,7 @@ import {
   type PaycrestOrder,
   type PaycrestRecipient,
   type PaycrestToken,
+  paycrestAmountDue,
 } from "@/rails/paycrest";
 import { pollPaycrestOrder } from "@/lib/paycrestPoll";
 import { trackOrder } from "@/lib/orderNotifications";
@@ -100,6 +101,18 @@ export interface ResumeParams {
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
+
+/**
+ * parseUnits that rounds UP when the amount has more decimals than the token
+ * (Paycrest can return e.g. "50.399233931644239"), so a deposit is never a
+ * hair short of what's due.
+ */
+function parseUnitsUp(amount: string, decimals: number): bigint {
+  const [whole, fraction = ""] = amount.split(".");
+  const kept = fraction.slice(0, decimals);
+  const units = parseUnits(kept ? `${whole}.${kept}` : whole, decimals);
+  return /[1-9]/.test(fraction.slice(decimals)) ? units + 1n : units;
+}
 
 export function usePaycrestOfframp(): UsePaycrestOfframpReturn {
   const config = useConfig();
@@ -212,10 +225,11 @@ export function usePaycrestOfframp(): UsePaycrestOfframpReturn {
         }
 
         // Stash everything fund() needs; wait for explicit user action.
+        // Send what Paycrest says is due (amount + fees), not the typed number.
         fundingRef.current = {
           tokenAddress,
           receiveAddress: getAddress(created.receiveAddress.toLowerCase()),
-          units,
+          units: parseUnitsUp(paycrestAmountDue(created), decimals),
           srcChainId,
           orderId: created.id,
         };
@@ -326,7 +340,7 @@ export function usePaycrestOfframp(): UsePaycrestOfframpReturn {
         fundingRef.current = {
           tokenAddress,
           receiveAddress: getAddress(fetched.receiveAddress.toLowerCase()),
-          units: parseUnits(fetched.amount, decimals),
+          units: parseUnitsUp(paycrestAmountDue(fetched), decimals),
           srcChainId,
           orderId: fetched.id,
         };

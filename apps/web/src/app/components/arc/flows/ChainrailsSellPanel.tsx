@@ -19,14 +19,23 @@
 
 import React, { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
-import { formatNumber, formatToken, fiatSymbol, currencyLabel } from "@/utils";
+import {
+  countryFlag,
+  formatNumber,
+  formatToken,
+  fiatSymbol,
+  currencyLabel,
+} from "@/utils";
 import {
   classifyRampStatus,
+  isBelowRampMinimum,
   isValidRampAddress,
   toE164,
+  type RampCountry,
   type RampDestination,
   type RampOrderPhase,
 } from "@/rails/chainrails";
+import { useRampCountries } from "@/hooks/useRampCountries";
 import { pollRampOrder } from "@/lib/chainrailsPoll";
 import { getChainIcon, getTokenIcon } from "@/utils/icons";
 import { PrefixedAmountInput } from "./PrefixedAmountInput";
@@ -37,6 +46,7 @@ import { linkRampOrder, trackRampOrder } from "../chainrailsOrders";
 import { EMAIL_RE, loadSavedEmail, saveEmail } from "../rampEmail";
 import { fetchKycState, type KycCorridor, type KycState } from "../rampKyc";
 import { KycVerification } from "./KycVerification";
+import { TokenLogo } from "../Web3Logo";
 
 /** Colored Iconify name for a token, or null when there's no real logo. */
 function tokenLogo(symbol: string): string | null {
@@ -161,16 +171,6 @@ function Confetti({ count = 16 }: { count?: number }) {
   );
 }
 
-type Country = {
-  countryCode: string;
-  name: string;
-  currency: { code: string; name: string; symbol: string; minAmount: number };
-};
-
-// Cache the country list for the session so switching chains (which remounts
-// this panel) doesn't re-flash a blank payout-country dropdown while it refetches.
-let COUNTRIES_CACHE: Country[] = [];
-
 type FieldOption = {
   label: string;
   value: string;
@@ -191,6 +191,21 @@ type PaymentChannel = {
   transferType: string;
   directTransferDetails?: { fieldsRequired?: FieldSpec[] };
 };
+
+/**
+ * True when a quote's amount matches its own rate. Some providers return
+ * broken figures (Yellow Card USDT on BNB came back as ₦13,560,746,678,835,888
+ * for 10 USDT), so we never show or use those.
+ */
+function isSaneQuote(q: {
+  fiatAmount: number;
+  cryptoAmount: number;
+  exchangeRatePerUSD: number;
+}): boolean {
+  const rate = Number(q.exchangeRatePerUSD);
+  const implied = Number(q.fiatAmount) / Number(q.cryptoAmount);
+  return rate > 0 && implied > 0 && Math.abs(implied - rate) / rate < 0.5;
+}
 
 type OffQuote = {
   provider: string;
@@ -227,6 +242,10 @@ export function ChainrailsSellPanel({
   backRef,
   amount,
   onAmountChange,
+  countryCode: chosenCountry,
+  onCountryChange,
+  token,
+  onTokenChange,
 }: {
   source: RampDestination;
   /** The shared "From" chain picker, rendered inside this card. */
@@ -257,9 +276,27 @@ export function ChainrailsSellPanel({
    *  between the Paycrest form and this panel. */
   amount: string;
   onAmountChange: (v: string) => void;
+  /** Set when the parent's currency picker chose the payout country.
+   *  "" means "Other country" — the user still has to pick one here. */
+  countryCode?: string;
+  onCountryChange?: (country: RampCountry) => void;
+  /** Stablecoin being sold, owned by the parent so it carries across forms. */
+  token: "USDC" | "USDT";
+  onTokenChange: (token: "USDC" | "USDT") => void;
 }) {
-  const [countries, setCountries] = useState<Country[]>(COUNTRIES_CACHE);
-  const [countryCode, setCountryCode] = useState("NG");
+  // Only countries ChainRails can pay out to.
+  const {
+    countries,
+    loading: countriesLoading,
+    error: countriesError,
+  } = useRampCountries("off-ramp");
+  const [ownCountry, setOwnCountry] = useState("NG");
+  const countryCode = chosenCountry ?? ownCountry;
+  const setCountryCode = (code: string) => {
+    const next = countries.find((c) => c.countryCode === code);
+    if (onCountryChange && next) onCountryChange(next);
+    else setOwnCountry(code);
+  };
   const [senderAddress, setSenderAddress] = useState("");
   const [email, setEmail] = useState("");
   const [quote, setQuote] = useState<OffQuote | null>(null);
@@ -279,7 +316,8 @@ export function ChainrailsSellPanel({
   const [order, setOrder] = useState<RampOrder | null>(null);
   const [phase, setPhase] = useState<RampOrderPhase>("pending");
 
-  const [loading, setLoading] = useState(COUNTRIES_CACHE.length === 0);
+  const [resuming, setResuming] = useState(!!resumeOrderId);
+  const loading = countriesLoading || resuming;
   const [quoting, setQuoting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -312,7 +350,7 @@ export function ChainrailsSellPanel({
         if (!cancelled)
           setError("We couldn't reopen this order. Try again from History.");
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setResuming(false);
       }
     })();
     return () => {
@@ -331,40 +369,60 @@ export function ChainrailsSellPanel({
     }
   }, [source.addressKind, connectedAddress, senderAddress]);
   // The field still holds the wallet address (user hasn't overridden it).
+  // Show the full address input only when asked (or when it isn't the wallet).
+  const [editSender, setEditSender] = useState(false);
   const usingWalletAddress =
     !!connectedAddress &&
     senderAddress.trim().toLowerCase() === connectedAddress.toLowerCase();
 
+  // Fall back to the first country if ours can't be paid out to.
   useEffect(() => {
-    let cancelled = false;
-    fetch("/api/chainrails/ramp/countries")
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "Couldn't load countries.");
-        if (cancelled) return;
-        const next = (data.countries ?? []) as Country[];
-        COUNTRIES_CACHE = next;
-        setCountries(next);
-        if (!next.some((c) => c.countryCode === "NG") && next[0])
-          setCountryCode(next[0].countryCode);
-      })
-      .catch(
-        (err) =>
-          !cancelled &&
-          setError(
-            err instanceof Error ? err.message : "Couldn't load countries."
-          )
-      )
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (countries.length && !countries.some((c) => c.countryCode === ownCountry))
+      setOwnCountry(countries[0].countryCode);
+  }, [countries, ownCountry]);
 
   const country = countries.find((c) => c.countryCode === countryCode);
   const cryptoAmount = Number(amount);
   const senderValid = isValidRampAddress(source.addressKind, senderAddress);
-  const canQuote = !!country && cryptoAmount > 0 && senderValid;
+  const belowMin = isBelowRampMinimum(country, cryptoAmount);
+
+  // Live rate preview (fiat per 1 USDC), so users can check the rate without
+  // creating a quote. One quote per country/chain, at the corridor minimum.
+  const [unitRate, setUnitRate] = useState<number | null>(null);
+  const [noRate, setNoRate] = useState(false);
+  useEffect(() => {
+    setUnitRate(null);
+    setNoRate(false);
+    if (!country) return;
+    let cancelled = false;
+    fetch("/api/chainrails/ramp/offramp-quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fiatCurrency: country.currency.code,
+        cryptoAmount: Math.max(10, country.currency.minAmount),
+        sourceChain: source.chainrailsChain,
+        countryCode: country.countryCode,
+        token,
+        preview: true,
+      }),
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (cancelled) return;
+        const all = res.ok ? [data.recommended, ...(data.quotes ?? [])] : [];
+        const best = all.find((q) => q && isSaneQuote(q));
+        if (best) setUnitRate(Number(best.exchangeRatePerUSD));
+        else setNoRate(true);
+      })
+      .catch(() => !cancelled && setNoRate(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [country, source.chainrailsChain, token]);
+  const estimate =
+    unitRate && cryptoAmount > 0 ? cryptoAmount * unitRate : null;
+  const canQuote = !!country && cryptoAmount > 0 && !belowMin && senderValid;
 
   // Load the bank list for the payout currency so a Paycrest-routed sell shows a
   // bank name dropdown (value = institution code) instead of a raw code box.
@@ -484,6 +542,7 @@ export function ChainrailsSellPanel({
           cryptoAmount,
           sourceChain: source.chainrailsChain,
           countryCode,
+          token,
         }),
       });
       const data = await res.json();
@@ -491,11 +550,12 @@ export function ChainrailsSellPanel({
       // Prefer Paycrest when the corridor offers it — it's our main rail, cheaper
       // here, and needs lighter KYC than Yellow Card. Otherwise take ChainRails'
       // own pick. Never a hard pin: it always falls back so the quote still works.
-      const offered: OffQuote[] =
-        data.quotes ?? (data.recommended ? [data.recommended] : []);
+      const offered: OffQuote[] = (
+        data.quotes ?? (data.recommended ? [data.recommended] : [])
+      ).filter(isSaneQuote);
       const selected =
         offered.find((q) => q.provider === "PAYCREST") ??
-        (data.recommended as OffQuote | undefined) ??
+        offered.find((q) => q.provider === data.recommended?.provider) ??
         offered[0];
       if (!selected)
         throw new Error(
@@ -550,6 +610,7 @@ export function ChainrailsSellPanel({
           cryptoAmount: quote.cryptoAmount,
           sourceChain: source.chainrailsChain,
           senderAddress: senderAddress.trim(),
+          amountSymbol: token,
           countryCode,
           // userEmail is a TOP-LEVEL KYC field — the provider 403s if it's
           // nested inside `fields`. The orders endpoint also rejects `quoteId`.
@@ -619,13 +680,15 @@ export function ChainrailsSellPanel({
     await postOrder();
   };
 
-  // Poll the created order via the shared ramp poller (as Buy/Paycrest do): it
-  // backs off toward 30s, pauses while the tab is hidden, and stops itself once
-  // the order settles. Keyed on the order id alone.
+  // Poll the order via the shared ramp poller (see chainrailsPoll for the
+  // cadence). A brand-new order waits before its first check — the user has
+  // to go send the crypto first. A reopened order checks straight away, since
+  // it may already be paid. Keyed on the order id alone.
   const orderId = order?.id;
   useEffect(() => {
     if (orderId == null) return;
     const handle = pollRampOrder<RampOrder>(orderId, {
+      waitFirst: !resumeOrderId,
       onUpdate: (data) => {
         setOrder(data);
         setPhase(classifyRampStatus(data.status));
@@ -636,6 +699,7 @@ export function ChainrailsSellPanel({
       },
     });
     return () => handle.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
 
   // Let the parent flow know the order screen owns the headline now.
@@ -1458,67 +1522,161 @@ export function ChainrailsSellPanel({
   return (
     <div className="card col gap-5" style={{ padding: 20 }}>
       <label className="col gap-2">
-        <span className="eyebrow">You sell</span>
-        <PrefixedAmountInput
-          amount={amount}
-          onAmountChange={onAmountChange}
-          prefix="$"
-        />
-        <span className="muted" style={{ fontSize: 12 }}>
-          USDC amount on {source.label}. The payout is shown in the live quote.
-        </span>
+        <span style={FORM_LABEL}>You sell</span>
+        <div className="row center gap-2">
+          <PrefixedAmountInput
+            amount={amount}
+            onAmountChange={onAmountChange}
+            prefix="$"
+          />
+          <div className="row center gap-1" style={{ flex: "0 0 auto" }}>
+            {(["USDC", "USDT"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onTokenChange(t);
+                }}
+                style={{
+                  cursor: "pointer",
+                  padding: "8px 14px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  lineHeight: 1.2,
+                  borderRadius: 999,
+                  border: "1px solid",
+                  background: token === t ? "var(--btn-bg)" : "var(--bg-elev)",
+                  color: token === t ? "var(--btn-fg)" : "var(--fg-soft)",
+                  borderColor: token === t ? "var(--btn-bg)" : "var(--line-2)",
+                }}
+              >
+                <TokenLogo symbol={t} size={16} />
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        {unitRate && country ? (
+          <>
+            <div
+              className="row center gap-2"
+              style={{ fontSize: 12.5, padding: "0 2px" }}
+            >
+              {estimate !== null && (
+                <span style={{ color: "var(--accent)", fontWeight: 500 }}>
+                  ≈ {formatNumber(estimate)} {country.currency.code}
+                </span>
+              )}
+              <span className="muted tabular">
+                {estimate !== null
+                  ? `(1 ${token} = ${formatNumber(unitRate)} ${country.currency.code})`
+                  : `1 ${token} = ${formatNumber(unitRate)} ${country.currency.code}`}
+              </span>
+            </div>
+            {estimate !== null && (
+              <span
+                className="muted"
+                style={{ fontSize: 11, padding: "0 2px", opacity: 0.85 }}
+              >
+                Estimate · final rate locks when you create the order
+              </span>
+            )}
+          </>
+        ) : noRate && token === "USDT" ? (
+          <span style={{ fontSize: 12, color: "var(--pend)" }}>
+            USDT can&apos;t be sold from {source.label} here. Switch to USDC or
+            pick another chain.
+          </span>
+        ) : (
+          <span className="muted" style={{ fontSize: 12 }}>
+            {token} amount on {source.label}. The payout is shown in the live
+            quote.
+          </span>
+        )}
       </label>
 
       {networkSelect && (
         <label className="col gap-2">
-          <span className="eyebrow">From</span>
+          <span style={FORM_LABEL}>From</span>
           {networkSelect}
         </label>
       )}
 
       <label className="col gap-2">
-        <span className="eyebrow">Recipient gets paid in</span>
+        <span style={FORM_LABEL}>Recipient gets paid in</span>
         <select
           value={countryCode}
           onChange={(e) => setCountryCode(e.target.value)}
           disabled={loading}
           style={INPUT}
         >
+          {!country && (
+            <option value="" disabled>
+              Choose a country…
+            </option>
+          )}
           {countries.map((c) => (
             <option key={c.countryCode} value={c.countryCode}>
-              {c.name} · {c.currency.code}
+              {countryFlag(c.countryCode)} {c.name} · {c.currency.code}
             </option>
           ))}
         </select>
-      </label>
-
-      <label className="col gap-2">
-        <div className="row center gap-1">
-          <span className="eyebrow">
-            Your {source.label} address (sending from)
-          </span>
-          {usingWalletAddress && (
-            <InfoHint
-              text={`This is your connected wallet address. You can sell from any ${source.label} address — just paste a different one here.`}
-            />
-          )}
-        </div>
-        <input
-          value={senderAddress}
-          onChange={(e) => setSenderAddress(e.target.value)}
-          placeholder={`Your ${source.label} wallet address`}
-          spellCheck={false}
-          autoComplete="off"
-          style={INPUT}
-        />
-        {senderAddress.trim() && !senderValid && (
-          <span style={{ fontSize: 12, color: "var(--err)" }}>
-            That doesn&apos;t look like a valid {source.label} address.
+        {belowMin && country && (
+          <span style={{ fontSize: 12, color: "var(--pend)" }}>
+            Minimum to {country.name} is {country.currency.minAmount} {token}.
           </span>
         )}
       </label>
 
-      {error && <ErrorBox message={error} />}
+      {/* ChainRails requires the sender address for a sell (it's where a
+          refund would go). With a wallet connected we already know it, so
+          show one quiet line instead of an input. */}
+      {usingWalletAddress && !editSender ? (
+        <div className="row center gap-2" style={{ fontSize: 13 }}>
+          <span className="muted">Sending from</span>
+          <span className="font-mono">
+            {senderAddress.slice(0, 6)}…{senderAddress.slice(-4)}
+          </span>
+          <button
+            type="button"
+            className="btn btn-quiet btn-sm"
+            onClick={() => setEditSender(true)}
+            style={{ padding: "0 6px" }}
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <label className="col gap-2">
+          <div className="row center gap-1">
+            <span style={FORM_LABEL}>Sending from</span>
+            <InfoHint
+              text={`The ${source.label} address you'll send from. If anything goes wrong, a refund goes back here.`}
+            />
+          </div>
+          <input
+            value={senderAddress}
+            onChange={(e) => setSenderAddress(e.target.value)}
+            placeholder={`Your ${source.label} wallet address`}
+            spellCheck={false}
+            autoComplete="off"
+            style={INPUT}
+          />
+          {senderAddress.trim() && !senderValid && (
+            <span style={{ fontSize: 12, color: "var(--err)" }}>
+              That doesn&apos;t look like a valid {source.label} address.
+            </span>
+          )}
+        </label>
+      )}
+
+      {(error ?? countriesError) && (
+        <ErrorBox message={(error ?? countriesError) as string} />
+      )}
 
       <button
         className="btn btn-fat"
@@ -1660,6 +1818,12 @@ function ErrorBox({ message }: { message: string }) {
     </div>
   );
 }
+
+/** Plain sentence-case label for the quote form fields. */
+const FORM_LABEL: React.CSSProperties = {
+  fontSize: 13,
+  color: "var(--fg-mute)",
+};
 
 const INPUT: React.CSSProperties = {
   width: "100%",

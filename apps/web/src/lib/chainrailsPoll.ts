@@ -4,13 +4,16 @@
  * Shared client-side poller for a single ChainRails ramp order — the twin of
  * paycrestPoll for the Chainrails routes.
  *
- * One loop per order id (opening the same order twice can't double-poll). It
- * polls immediately, holds 5s for the first few ticks, then backs off toward
- * 30s, pauses entirely while the tab is hidden or unfocused, and stops the
- * moment the order reaches a terminal state or hits the attempt cap.
+ * One loop per order id (opening the same order twice can't double-poll).
  *
- * Callers should only start it once there's something worth watching — i.e.
- * after the user opens the checkout, or when resuming an order from History.
+ * Paying a ramp order happens elsewhere (provider checkout, KYC, a bank app or
+ * wallet) and takes minutes, so checking fast is wasted. The loop:
+ *   - checks every 30s for the first few ticks, then every 60s;
+ *   - pauses while the tab is hidden or unfocused (the user is off paying),
+ *     and checks once straight away when they come back;
+ *   - stops at a terminal state or the attempt cap.
+ * `waitFirst` skips the opening check (the user just left to pay); `fast`
+ * checks every 5s, only for waiting on bank details we can't show yet.
  */
 
 import {
@@ -30,18 +33,29 @@ export interface RampPollOptions<T extends { status?: string | null }> {
   onSettled: (order: T | null, phase: RampOrderPhase) => void;
   /** Hard cap on requests before the order is treated as unresolved. */
   maxAttempts?: number;
+  /** Don't check right away — the user has just gone off to pay. */
+  waitFirst?: boolean;
+  /** Check every 5s — only while waiting for payment details to appear. */
+  fast?: boolean;
 }
 
-const BASE_INTERVAL_MS = 5_000;
-const MAX_INTERVAL_MS = 30_000;
-const STEADY_TICKS = 3; // poll at 5s this many times, then start backing off
+const FAST_INTERVAL_MS = 5_000;
+const EARLY_INTERVAL_MS = 30_000;
+const LATE_INTERVAL_MS = 60_000;
+const EARLY_TICKS = 4; // 30s this many times (~2 min), then every 60s
 
 /** One live poller per order id. */
 const active = new Map<string, RampPollHandle>();
 
 export function pollRampOrder<T extends { status?: string | null }>(
   orderId: string | number,
-  { onUpdate, onSettled, maxAttempts = 120 }: RampPollOptions<T>
+  {
+    onUpdate,
+    onSettled,
+    maxAttempts = 120,
+    waitFirst = false,
+    fast = false,
+  }: RampPollOptions<T>
 ): RampPollHandle {
   const key = String(orderId);
   const running = active.get(key);
@@ -57,14 +71,13 @@ export function pollRampOrder<T extends { status?: string | null }>(
   // the provider's checkout tab would be pure waste.
   const isAwake = () => !document.hidden && (document.hasFocus?.() ?? true);
 
-  // 5s, 5s, 5s, 10s, 20s, 30s, 30s… — quick at first, calm once it drags on.
+  // 30s ×4, then 60s. Fast mode: 5s.
   const nextDelay = () =>
-    attempt <= STEADY_TICKS
-      ? BASE_INTERVAL_MS
-      : Math.min(
-          BASE_INTERVAL_MS * 2 ** (attempt - STEADY_TICKS),
-          MAX_INTERVAL_MS
-        );
+    fast
+      ? FAST_INTERVAL_MS
+      : attempt < EARLY_TICKS
+        ? EARLY_INTERVAL_MS
+        : LATE_INTERVAL_MS;
 
   const schedule = () => {
     if (stopped || timer !== null || requestInFlight) return;
@@ -150,6 +163,7 @@ export function pollRampOrder<T extends { status?: string | null }>(
   document.addEventListener("visibilitychange", onActivityChange);
   window.addEventListener("focus", onActivityChange);
   window.addEventListener("blur", onActivityChange);
-  void tick(); // first poll immediately
+  if (waitFirst) schedule();
+  else void tick(); // check straight away
   return handle;
 }

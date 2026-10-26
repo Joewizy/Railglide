@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { amountBeforeFee } from "@/config/fees";
 import { NextRequest, NextResponse } from "next/server";
 import {
   PAYCREST_BASE_URL,
@@ -349,7 +350,9 @@ function buildOfframpBody(
   return {
     currency: currency.toUpperCase(),
     body: {
-      amount,
+      // The user's typed amount includes our fee; Paycrest adds the fee on
+      // top of `amount`, so order the amount before fee (800 → 796.02).
+      amount: String(amountBeforeFee(Number(amount))),
       source: {
         type: "crypto",
         currency: token,

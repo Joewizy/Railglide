@@ -162,6 +162,21 @@ function isCacheFresh(cache: CachedOrder, key: string): boolean {
   return Date.now() - cache.createdAt < 30 * 60 * 1000;
 }
 
+/**
+ * The order's phase from the server, respecting the payment deadline. The
+ * provider's clock lags ours and keeps saying "pending" for a while after the
+ * window closes — without this the screen flips between Expired and Waiting
+ * on every poll. Real progress (paid, done, failed) still wins.
+ */
+function phaseFor(data: RampOrder): RampOrderPhase {
+  const phase = classifyRampStatus(data.status);
+  const expiresAt = data.expiresAt ? Date.parse(data.expiresAt) : NaN;
+  const lapsed = Number.isFinite(expiresAt) && Date.now() >= expiresAt;
+  return lapsed && (phase === "pending" || phase === "unknown")
+    ? "expired"
+    : phase;
+}
+
 export function ChainrailsStatus({
   intent,
   onDone,
@@ -189,6 +204,9 @@ export function ChainrailsStatus({
   // checkout, or when resuming an order from History. Before that the sole
   // possible change is expiry, which the local countdown handles.
   const [polling, setPolling] = useState(false);
+  // "later" once the user has just gone off to pay (or we've just checked),
+  // so the poller skips its opening check.
+  const [pollStart, setPollStart] = useState<"now" | "later">("now");
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   // Only the setter is read now — "still creating" is derived from `orderId`.
@@ -308,7 +326,7 @@ export function ChainrailsStatus({
         setOrderId(id);
         setWidgetUrl(checkoutUrl ?? null);
         setOrder(data);
-        setPhase(classifyRampStatus(data.status));
+        setPhase(phaseFor(data));
       } catch (err) {
         if (!cancelled)
           setError(
@@ -336,12 +354,19 @@ export function ChainrailsStatus({
   //     (the whole time they're in the checkout tab), fires instantly on return,
   //     and stops at a terminal state. Keyed on the id so refreshing the order
   //     each tick doesn't re-arm it. ------------------------------------------
+  const hasTransfer = !!order?.transferInstructions?.accountIdentifier;
+  // Nothing to act on yet (no checkout link, no bank details) — check every 5s
+  // until something arrives. Once bank details show, the user goes off to pay,
+  // so the poller waits before its next check.
+  const waitingForDetails = !widgetUrl && !hasTransfer;
   useEffect(() => {
     if (!polling || !orderId) return;
     const handle = pollRampOrder<RampOrder>(orderId, {
+      fast: waitingForDetails,
+      waitFirst: pollStart === "later" || hasTransfer,
       onUpdate: (data) => {
         setOrder(data);
-        setPhase(classifyRampStatus(data.status));
+        setPhase(phaseFor(data));
         // Resumed orders start without a checkout URL — adopt it from the order.
         const polledUrl = pickCheckoutUrl(data);
         if (polledUrl) setWidgetUrl((cur) => cur ?? polledUrl);
@@ -352,9 +377,8 @@ export function ChainrailsStatus({
       },
     });
     return () => handle.stop();
-  }, [polling, orderId]);
+  }, [polling, orderId, waitingForDetails, pollStart, hasTransfer]);
 
-  const hasTransfer = !!order?.transferInstructions?.accountIdentifier;
   // Once an order exists but we can't act yet, poll to fetch what we need.
   // Bank-transfer providers return the account a beat after creation (via the
   // order, not the create response), so without this the screen would sit on a
@@ -386,6 +410,7 @@ export function ChainrailsStatus({
   // background cadence is running from here on.
   const checkNow = async () => {
     if (!orderId) return;
+    setPollStart("later"); // this check is the "now" one
     setPolling(true);
     try {
       const res = await fetch(`/api/chainrails/ramp/orders/${orderId}`, {
@@ -395,7 +420,7 @@ export function ChainrailsStatus({
       const data = (await res.json()) as RampOrder | null;
       if (!data) return;
       setOrder(data);
-      setPhase(classifyRampStatus(data.status));
+      setPhase(phaseFor(data));
     } catch {
       /* ignore — the poller retries */
     }
@@ -675,7 +700,11 @@ export function ChainrailsStatus({
               target="_blank"
               rel="noopener noreferrer"
               style={{ textDecoration: "none" }}
-              onClick={() => setPolling(true)}
+              onClick={() => {
+                // They're off to pay — check when they come back, not now.
+                setPollStart("later");
+                setPolling(true);
+              }}
             >
               Continue your order <Icon.ArrowRight />
             </a>

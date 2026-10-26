@@ -28,6 +28,7 @@ import {
   humanizePaycrestError,
   isPaycrestFiat,
   paycrestNetworkSlug,
+  paycrestAmountDue,
   paycrestPayoutInFlight,
   type PaycrestFiat,
   type PaycrestOrder,
@@ -62,6 +63,17 @@ export interface PaycrestOfframpParams {
 }
 
 /** True when the wallet error is the user declining the signature. */
+/**
+ * parseUnits that rounds UP when the amount has more decimals than the token,
+ * so a deposit is never a hair short of what's due.
+ */
+function parseUnitsUp(amount: string, decimals: number): bigint {
+  const [whole, fraction = ""] = amount.split(".");
+  const kept = fraction.slice(0, decimals);
+  const units = parseUnits(kept ? `${whole}.${kept}` : whole, decimals);
+  return /[1-9]/.test(fraction.slice(decimals)) ? units + 1n : units;
+}
+
 export function isUserRejection(err: unknown): boolean {
   if (err instanceof BaseError) {
     return Boolean(err.walk((e) => e instanceof UserRejectedRequestError));
@@ -190,10 +202,11 @@ export function usePaycrestOfframp() {
         if (!created.receiveAddress) {
           throw new Error("We didn't get a deposit address for this order.");
         }
+        // Send what Paycrest says is due (amount + fees), not the typed number.
         fundingRef.current = {
           tokenAddress,
           receiveAddress: getAddress(created.receiveAddress.toLowerCase()),
-          units,
+          units: parseUnitsUp(paycrestAmountDue(created), decimals),
           srcChainId,
           orderId: created.id,
         };
@@ -304,7 +317,10 @@ export function usePaycrestOfframp() {
             : undefined;
           if (fromChain && rawToken && decimals !== undefined && srcChainId) {
             try {
-              const units = parseUnits(fetched.amount, decimals);
+              const units = parseUnitsUp(
+                paycrestAmountDue(fetched),
+                decimals
+              );
               if (units > 0n) {
                 fundingRef.current = {
                   tokenAddress: getAddress(rawToken.toLowerCase()),
