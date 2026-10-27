@@ -13,6 +13,12 @@
  */
 
 import React from "react";
+import {
+  SUPPORT_EMAIL,
+  SUPPORT_EMAIL_URL,
+  SUPPORT_TELEGRAM,
+  SUPPORT_TELEGRAM_URL,
+} from "@/config/support";
 import { Icon } from "./icons";
 import type { FlowId } from "@/assistant/types";
 
@@ -200,6 +206,24 @@ export function Home({
         </span>
         <Icon.ArrowRight size={14} />
       </button>
+
+      {/* How to reach us */}
+      <p className="muted" style={{ fontSize: 13, textAlign: "center" }}>
+        Need help? Email{" "}
+        <a href={SUPPORT_EMAIL_URL} style={{ color: "var(--fg)", fontWeight: 500 }}>
+          {SUPPORT_EMAIL}
+        </a>{" "}
+        or message{" "}
+        <a
+          href={SUPPORT_TELEGRAM_URL}
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: "var(--fg)", fontWeight: 500 }}
+        >
+          @{SUPPORT_TELEGRAM}
+        </a>{" "}
+        on Telegram.
+      </p>
     </div>
   );
 }

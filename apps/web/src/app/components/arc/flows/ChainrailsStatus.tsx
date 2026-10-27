@@ -19,9 +19,13 @@ import {
 } from "@/rails/chainrails";
 import { type Intent } from "../SendScreen";
 import { Icon } from "../icons";
+import { FlowPage } from "../ui/sendKit";
+import { ExpiredOrder } from "../ui/ExpiredOrder";
+import { savePendingLaunch } from "../swapUrl";
 import { linkRampOrder, trackRampOrder } from "../chainrailsOrders";
 import { loadSavedEmail } from "../rampEmail";
 import { getTokenIcon } from "@/utils/icons";
+import { formatFiat, formatToken } from "@/utils";
 import { pollRampOrder } from "@/lib/chainrailsPoll";
 
 /** Colored Iconify name for a token/chain, or null when there's no real logo. */
@@ -64,6 +68,7 @@ type RampOrder = {
   recipientAddress?: string;
   widgetUrl?: string;
   expiresAt?: string;
+  createdAt?: string;
   providerTxHash?: string | null;
   /** Bank-transfer providers (e.g. PAYCREST) return the account to pay into here
    *  instead of a hosted checkout URL. */
@@ -263,7 +268,6 @@ export function ChainrailsStatus({
       return;
     }
 
-    let cancelled = false;
     (async () => {
       try {
         const res = await fetch("/api/chainrails/ramp/orders", {
@@ -296,7 +300,7 @@ export function ChainrailsStatus({
         const id = String(data.id);
         // Persist FIRST, regardless of mount state: the order now exists
         // upstream, so it must reach the cache + History even if this effect was
-        // torn down (React StrictMode remounts in dev, setting `cancelled`).
+        // torn down (React StrictMode remounts in dev).
         const checkoutUrl = pickCheckoutUrl(data);
         writeCache({
           key: purchaseKey,
@@ -328,20 +332,16 @@ export function ChainrailsStatus({
         setOrder(data);
         setPhase(phaseFor(data));
       } catch (err) {
-        if (!cancelled)
-          setError(
-            err instanceof Error
-              ? err.message
-              : "Couldn't create the ramp order."
-          );
+        // Same as the success path: set state unconditionally. In StrictMode
+        // this first run is the only one (the second returns on `startedRef`),
+        // so skipping it on "cancelled" left the page loading forever.
+        setError(
+          err instanceof Error ? err.message : "Couldn't create the ramp order."
+        );
       } finally {
-        if (!cancelled) setCreating(false);
+        setCreating(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -534,6 +534,80 @@ export function ChainrailsStatus({
           body: "The provider couldn't process this order.",
           note: "Already paid? Your payment will be refunded.",
         };
+
+  // Reopened from History: wait for the first status check instead of
+  // flashing the "waiting for payment" screen before the real state lands.
+  if (intent.resumeOrderId && !order && !error) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-16 text-[13px] text-muted">
+        <span className="size-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+        Loading order…
+      </div>
+    );
+  }
+
+  // Expired with no payment: the same calm page as Paycrest orders. "Buy
+  // again" reopens Buy with the same amount, currency and chain — ChainRails
+  // prices it fresh there.
+  if (phase === "expired" && orderCreated && !error) {
+    const typed = Number(exec.fromAmount ?? 0);
+    const recipient = order?.recipientAddress ?? exec.recipient;
+    return (
+      <FlowPage
+        wide
+        mode="buy"
+        onBack={intent.resumeOrderId ? goBack : undefined}
+      >
+        <ExpiredOrder
+          steps={["Amount", "Review", "Pay"]}
+          deadline={order?.expiresAt ?? null}
+          createdAt={order?.createdAt ?? null}
+          againTitle="Buy again"
+          againSub="Same amount, wallet and chain. You'll see today's rate before paying."
+          payLabel="You pay"
+          payAmount={
+            typed > 0 && exec.fiatCurrency
+              ? formatFiat(exec.fiatCurrency, typed)
+              : (fiatLabel ?? "—")
+          }
+          receiveLabel="You receive"
+          receiveAmount={cryptoCurrency}
+          rateLine="Today's amount shows on the next step"
+          primaryLabel="Buy again"
+          onPrimary={() => {
+            savePendingLaunch({
+              flow: "buy",
+              amount: exec.fromAmount,
+              currency: exec.fiatCurrency ?? undefined,
+              token: "USDC",
+              chain: ramp?.destinationChain,
+            });
+            startNew();
+          }}
+          quoteRows={[
+            ...(fiatLabel ? [{ label: "You were paying", value: fiatLabel }] : []),
+            {
+              label: "You'd have received",
+              value:
+                order?.cryptoAmount != null
+                  ? formatToken(order.cryptoAmount, cryptoCurrency, 2)
+                  : cryptoLabel,
+            },
+            ...(recipient
+              ? [
+                  {
+                    label: "To",
+                    value: `${recipient.slice(0, 6)}…${recipient.slice(-4)} · ${chainName}`,
+                  },
+                ]
+              : []),
+          ]}
+          orderId={orderId}
+          onHome={onDone}
+        />
+      </FlowPage>
+    );
+  }
 
   return (
     <div className="cr-status col">

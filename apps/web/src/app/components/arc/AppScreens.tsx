@@ -30,7 +30,7 @@ export function isFundable(o: Order): boolean {
   if (o.direction === "offramp") {
     return o.status === "initiated" && !!o.receiveAddress;
   }
-  return o.status === "initiated" && !!o.depositAccountIdentifier;
+  return o.awaitingPayment && !!o.depositAccountIdentifier;
 }
 
 function shortAddress(addr: string): string {
@@ -38,11 +38,12 @@ function shortAddress(addr: string): string {
 }
 
 /** Maps a Paycrest status to a chip tone + label. */
-function statusChip(status: string): {
+function statusChip(order: Order): {
   tone: "ok" | "pend" | "err";
   label: string;
 } {
-  switch (status) {
+  if (order.awaitingPayment) return { tone: "pend", label: "Waiting for payment" };
+  switch (order.status) {
     case "fulfilled":
     case "settled":
       return { tone: "ok", label: "Paid" };
@@ -151,6 +152,22 @@ export function HistoryScreen({
     }
   }, [isConnected, address, load]);
 
+  // Paycrest (signed-in wallet) and ChainRails (this browser / email) orders,
+  // merged into one list, newest first.
+  const rampHistory = useChainrailsHistory();
+  const merged = [
+    ...orders.map((order) => ({
+      kind: "paycrest" as const,
+      at: order.createdAt ? Date.parse(order.createdAt) : 0,
+      order,
+    })),
+    ...rampHistory.orders.map((order) => ({
+      kind: "chainrails" as const,
+      at: order.createdAt,
+      order,
+    })),
+  ].sort((a, b) => b.at - a.at);
+
   return (
     <div className="col gap-6">
       <header className="row between center wrap" style={{ gap: 12 }}>
@@ -183,9 +200,6 @@ export function HistoryScreen({
         )}
       </header>
 
-      {/* ChainRails ramp orders (local to this browser; no wallet/SIWE gate). */}
-      <ChainrailsHistorySection onResume={onResumeChainrails} />
-
       {!isConnected ? (
         <EmptyState
           title="Connect your wallet"
@@ -215,19 +229,36 @@ export function HistoryScreen({
         />
       ) : error ? (
         <EmptyState title="Couldn't load orders" sub={error} />
-      ) : loading && orders.length === 0 ? (
+      ) : loading && orders.length === 0 && rampHistory.orders.length === 0 ? (
         <EmptyState title="Loading…" sub="Fetching your orders." />
-      ) : orders.length === 0 ? (
-        <EmptyState
-          title="No orders yet"
-          sub="Your cash-outs will show up here once you create one."
-        />
-      ) : (
+      ) : null}
+
+      {/* One list, newest first, whichever provider ran the order. */}
+      {merged.length > 0 ? (
         <div className="col gap-3">
-          {orders.map((o) => (
-            <OrderCard key={o.id} order={o} onResume={onResume} />
-          ))}
+          {merged.map((item) =>
+            item.kind === "paycrest" ? (
+              <OrderCard key={item.order.id} order={item.order} onResume={onResume} />
+            ) : (
+              <ChainrailsOrderCard
+                key={`cr-${item.order.id}`}
+                order={item.order}
+                phase={rampHistory.phases[item.order.id]}
+                onResume={onResumeChainrails}
+              />
+            )
+          )}
         </div>
+      ) : (
+        isConnected &&
+        !needsAuth &&
+        !error &&
+        !loading && (
+          <EmptyState
+            title="No orders yet"
+            sub="Your Buy and Sell orders will show up here."
+          />
+        )
       )}
     </div>
   );
@@ -297,11 +328,8 @@ function mergeRampOrders(
 }
 
 /** Chainrails ramp orders (local track + server history), status re-fetched. */
-function ChainrailsHistorySection({
-  onResume,
-}: {
-  onResume?: (order: TrackedRampOrder) => void;
-}) {
+/** ChainRails orders (this browser + server history by saved email) with live phases. */
+function useChainrailsHistory() {
   const [orders, setOrders] = useState<TrackedRampOrder[]>([]);
   const [phases, setPhases] = useState<Record<string, RampOrderPhase>>({});
 
@@ -353,21 +381,7 @@ function ChainrailsHistorySection({
     };
   }, []);
 
-  if (orders.length === 0) return null;
-
-  return (
-    <div className="col gap-3">
-      <span className="eyebrow">Recent</span>
-      {orders.map((o) => (
-        <ChainrailsOrderCard
-          key={o.id}
-          order={o}
-          phase={phases[o.id]}
-          onResume={onResume}
-        />
-      ))}
-    </div>
-  );
+  return { orders, phases };
 }
 
 function ChainrailsOrderCard({
@@ -466,7 +480,7 @@ function OrderCard({
   order: Order;
   onResume?: (order: Order) => void;
 }) {
-  const chip = statusChip(order.status);
+  const chip = statusChip(order);
   const isOfframp = order.direction === "offramp";
   const fundable = isFundable(order);
   const openable = !!onResume;
@@ -486,7 +500,7 @@ function OrderCard({
           <span style={{ fontSize: 15, fontWeight: 500 }}>
             {isOfframp ? "Sell" : "Buy crypto"} ·{" "}
             <span className="font-mono">
-              {cryptoAmount} {order.token}
+              {cryptoAmount}
             </span>
           </span>
           <span

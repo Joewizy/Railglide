@@ -364,7 +364,9 @@ export default function AppShell() {
     clearStoredIntent();
     clearFlowDraft();
     clearChatState();
-    setRecentIntent(null);
+    // Don't clear recentIntent here: the URL change lands a moment later, and
+    // until then the status screen would render with no order ("Starting…",
+    // 0 amounts). The effect above clears it once ?status is gone.
     patchUrl({ status: null, step: null });
   };
 
@@ -374,7 +376,10 @@ export default function AppShell() {
   // to the chooser; only the bare home leaves the app to the landing page.
   const onBack = () => {
     if (showStatus) {
-      router.back();
+      // An order opened from History (or a "finished" toast) goes back to
+      // History; a fresh order steps back in the browser history.
+      if (recentIntent?.resumeOrderId) goToView("history");
+      else router.back();
       return;
     }
     if (flow) {
@@ -413,13 +418,16 @@ export default function AppShell() {
     }
   };
 
+  // While the order loads (refresh) there's nothing to show yet.
   const sendBody = showStatus ? (
-    <StatusScreen
-      intent={recentIntent}
-      onDone={finishStatus}
-      onStartNew={() => pickFlow("buy")}
-      onBack={onBack}
-    />
+    recentIntent && (
+      <StatusScreen
+        intent={recentIntent}
+        onDone={finishStatus}
+        onStartNew={() => pickFlow("buy")}
+        onBack={onBack}
+      />
+    )
   ) : (
     flowBody()
   );
@@ -456,7 +464,10 @@ export default function AppShell() {
   if (isMobile) {
     return (
       <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
-        <MobileTopBar onMenu={() => setDrawerOpen(true)} onBack={onBack} />
+        <MobileTopBar
+          onMenu={() => setDrawerOpen(true)}
+          onHome={() => goToView("send")}
+        />
         {main}
         {drawerOpen && (
           <div
@@ -549,7 +560,8 @@ export default function AppShell() {
         }}
       >
         <button
-          onClick={onBack}
+          onClick={() => goToView("send")}
+          aria-label="Railglide home"
           className="row center gap-2"
           style={{
             background: "transparent",
@@ -593,10 +605,11 @@ function WithBack({
 
 function MobileTopBar({
   onMenu,
-  onBack,
+  onHome,
 }: {
   onMenu: () => void;
-  onBack: () => void;
+  /** The logo always goes to the app home. */
+  onHome: () => void;
 }) {
   return (
     <div
@@ -632,7 +645,8 @@ function MobileTopBar({
         </svg>
       </button>
       <button
-        onClick={onBack}
+        onClick={onHome}
+        aria-label="Railglide home"
         className="row center gap-2"
         style={{
           background: "transparent",

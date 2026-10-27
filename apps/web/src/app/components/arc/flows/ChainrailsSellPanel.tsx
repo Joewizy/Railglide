@@ -19,8 +19,8 @@
 
 import React, { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
+import { cachedFetch, ONE_HOUR } from "@/lib/cachedFetch";
 import {
-  countryFlag,
   formatNumber,
   formatToken,
   fiatSymbol,
@@ -38,15 +38,24 @@ import {
 import { useRampCountries } from "@/hooks/useRampCountries";
 import { pollRampOrder } from "@/lib/chainrailsPoll";
 import { getChainIcon, getTokenIcon } from "@/utils/icons";
-import { PrefixedAmountInput } from "./PrefixedAmountInput";
 import { InfoHint, AccountNameStatus } from "../SendScreen";
-import { type PaycrestInstitution } from "@/rails/paycrest";
+import { isPaycrestFiat, type PaycrestInstitution } from "@/rails/paycrest";
+import {
+  AmountField,
+  ArrowRight,
+  CurrencyPill,
+  Notice,
+  PrimaryButton,
+  RateLine,
+  Reassurance,
+} from "../ui/sendKit";
+import { CurrencyPicker, type CountryOption } from "../ui/sendPickers";
+import { ExpiredOrder } from "../ui/ExpiredOrder";
 import { Icon } from "../icons";
 import { linkRampOrder, trackRampOrder } from "../chainrailsOrders";
 import { EMAIL_RE, loadSavedEmail, saveEmail } from "../rampEmail";
 import { fetchKycState, type KycCorridor, type KycState } from "../rampKyc";
 import { KycVerification } from "./KycVerification";
-import { TokenLogo } from "../Web3Logo";
 
 /** Colored Iconify name for a token, or null when there's no real logo. */
 function tokenLogo(symbol: string): string | null {
@@ -231,7 +240,7 @@ type RampOrder = {
 
 export function ChainrailsSellPanel({
   source,
-  networkSelect,
+  chainPicker,
   resumeOrderId,
   resumeFiatLabel,
   resumeDepositLabel,
@@ -245,11 +254,10 @@ export function ChainrailsSellPanel({
   countryCode: chosenCountry,
   onCountryChange,
   token,
-  onTokenChange,
 }: {
   source: RampDestination;
-  /** The shared "From" chain picker, rendered inside this card. */
-  networkSelect?: React.ReactNode;
+  /** The parent's token + chain pill, shown in the "You send" field. */
+  chainPicker?: React.ReactNode;
   /** Re-open an existing order (from History) instead of creating one. */
   resumeOrderId?: string;
   /** Pre-formatted payout amount (e.g. "6,722 NGN") shown while resuming, since
@@ -282,7 +290,6 @@ export function ChainrailsSellPanel({
   onCountryChange?: (country: RampCountry) => void;
   /** Stablecoin being sold, owned by the parent so it carries across forms. */
   token: "USDC" | "USDT";
-  onTokenChange: (token: "USDC" | "USDT") => void;
 }) {
   // Only countries ChainRails can pay out to.
   const {
@@ -298,6 +305,7 @@ export function ChainrailsSellPanel({
     else setOwnCountry(code);
   };
   const [senderAddress, setSenderAddress] = useState("");
+  const [currencyOpen, setCurrencyOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [quote, setQuote] = useState<OffQuote | null>(null);
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
@@ -368,12 +376,6 @@ export function ChainrailsSellPanel({
       setSenderAddress(connectedAddress);
     }
   }, [source.addressKind, connectedAddress, senderAddress]);
-  // The field still holds the wallet address (user hasn't overridden it).
-  // Show the full address input only when asked (or when it isn't the wallet).
-  const [editSender, setEditSender] = useState(false);
-  const usingWalletAddress =
-    !!connectedAddress &&
-    senderAddress.trim().toLowerCase() === connectedAddress.toLowerCase();
 
   // Fall back to the first country if ours can't be paid out to.
   useEffect(() => {
@@ -395,7 +397,8 @@ export function ChainrailsSellPanel({
     setNoRate(false);
     if (!country) return;
     let cancelled = false;
-    fetch("/api/chainrails/ramp/offramp-quote", {
+    // Cached for a minute: flipping between chains/tokens reuses it.
+    cachedFetch("/api/chainrails/ramp/offramp-quote", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -430,7 +433,11 @@ export function ChainrailsSellPanel({
   useEffect(() => {
     if (!payoutCurrency) return;
     let cancelled = false;
-    fetch(`/api/paycrest/institutions?currency=${encodeURIComponent(payoutCurrency)}`)
+    cachedFetch(
+      `/api/paycrest/institutions?currency=${encodeURIComponent(payoutCurrency)}`,
+      {},
+      ONE_HOUR
+    )
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok || cancelled) return;
@@ -533,13 +540,16 @@ export function ChainrailsSellPanel({
     if (!country || !canQuote) return;
     setQuoting(true);
     setError(null);
-    try {
+    // One quote for a given amount to convert. Prefer Paycrest when the
+    // corridor offers it — our main rail, cheaper here, lighter KYC than
+    // Yellow Card — else ChainRails' own pick. Never a hard pin.
+    const quoteFor = async (amountToConvert: number): Promise<OffQuote> => {
       const res = await fetch("/api/chainrails/ramp/offramp-quote", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fiatCurrency: country.currency.code,
-          cryptoAmount,
+          cryptoAmount: amountToConvert,
           sourceChain: source.chainrailsChain,
           countryCode,
           token,
@@ -547,20 +557,42 @@ export function ChainrailsSellPanel({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Couldn't get a quote.");
-      // Prefer Paycrest when the corridor offers it — it's our main rail, cheaper
-      // here, and needs lighter KYC than Yellow Card. Otherwise take ChainRails'
-      // own pick. Never a hard pin: it always falls back so the quote still works.
       const offered: OffQuote[] = (
         data.quotes ?? (data.recommended ? [data.recommended] : [])
       ).filter(isSaneQuote);
-      const selected =
+      const pick =
         offered.find((q) => q.provider === "PAYCREST") ??
         offered.find((q) => q.provider === data.recommended?.provider) ??
         offered[0];
-      if (!selected)
+      if (!pick)
         throw new Error(
           "No provider can fill that amount right now — try a different amount."
         );
+      return pick;
+    };
+
+    try {
+      // Like Paycrest, the user sends exactly what they typed and the fee comes
+      // out of it. ChainRails prices the amount converted and adds its fee on
+      // top (0.5%, capped at 1.5 USDC, seen 2026-10-27), so one quote tells us
+      // the fee and we convert (typed − fee). No second quote: orders don't
+      // take a quote id (ChainRails re-prices at creation) and the order
+      // response carries the exact deposit amount, which the next screen shows.
+      const quoted = await quoteFor(cryptoAmount);
+      const fee =
+        Number(quoted.grossDepositAmount) - Number(quoted.cryptoAmount);
+      const rate = Number(quoted.exchangeRatePerUSD);
+      const toConvert =
+        fee > 0 ? Math.floor((cryptoAmount - fee) * 1e6) / 1e6 : cryptoAmount;
+      const selected: OffQuote =
+        fee > 0
+          ? {
+              ...quoted,
+              cryptoAmount: toConvert,
+              grossDepositAmount: cryptoAmount,
+              fiatAmount: rate > 0 ? toConvert * rate : quoted.fiatAmount,
+            }
+          : quoted;
       // Seed enum fields with their first option so a valid value is preselected.
       const fields =
         selected.paymentChannels[0]?.directTransferDetails?.fieldsRequired ??
@@ -811,6 +843,49 @@ export function ChainrailsSellPanel({
         ? "Your deposit is confirming on-chain — the payout releases shortly."
         : `Send exactly ${amountLabel} to the address below to complete the payout.`;
 
+    // Expired with no deposit: the same calm page as every other expired
+    // order. "Sell again" keeps the amount and country and gets a fresh quote.
+    if (phase === "expired") {
+      const amountNum = Number(amount);
+      return (
+        <ExpiredOrder
+          twoColumns={false}
+          steps={["Amount", "Recipient", "Send"]}
+          deadline={null}
+          createdAt={null}
+          againTitle="Sell again at today's rate"
+          againSub="Same amount and payout country. You'll get a fresh quote and deposit address."
+          payLabel="You send"
+          payAmount={amountNum > 0 ? formatToken(amountNum, token, 2) : amountLabel}
+          receiveLabel="They receive about"
+          receiveAmount={
+            estimate !== null && country
+              ? `${fiatSymbol(country.currency.code)}${formatNumber(estimate)}`
+              : null
+          }
+          rateLine={
+            unitRate && country
+              ? `1 ${token} ≈ ${formatNumber(unitRate)} ${country.currency.code}`
+              : null
+          }
+          primaryLabel="Sell again"
+          onPrimary={() => {
+            setOrder(null);
+            setQuote(null);
+            setPhase("pending");
+            setError(null);
+            onStartNew?.();
+          }}
+          quoteRows={[
+            { label: "You were sending", value: amountLabel },
+            { label: "They'd have received", value: fiatLine },
+            { label: "From", value: networkLabel },
+          ]}
+          orderId={String(order.id)}
+        />
+      );
+    }
+
     // Completed — the hero moment (mirrors the Paycrest success card).
     if (paidOut) {
       return (
@@ -953,9 +1028,7 @@ export function ChainrailsSellPanel({
           <span className="row center gap-2">
             <span className="eyebrow">Status</span>
             {failed && (
-              <span className="chip chip-err">
-                {phase === "expired" ? "Expired" : "Failed"}
-              </span>
+              <span className="chip chip-err">Failed</span>
             )}
           </span>
           <h1
@@ -1064,9 +1137,8 @@ export function ChainrailsSellPanel({
                     lineHeight: 1.5,
                   }}
                 >
-                  {phase === "expired"
-                    ? `We didn't receive your ${amountLabel} in time. If you already sent it, it will be refunded to your wallet.`
-                    : "The provider couldn't process this order. If you already sent your crypto, it will be refunded to your wallet."}
+                  The provider couldn&apos;t process this order. If you already
+                  sent your crypto, it will be refunded to your wallet.
                 </span>
               </div>
             )}
@@ -1102,9 +1174,7 @@ export function ChainrailsSellPanel({
                 : paidOut || i < activeIndex;
               const isActive = !failedPhase && !paidOut && i === activeIndex;
               const statusLabel = isFailed
-                ? phase === "expired"
-                  ? "expired"
-                  : "failed"
+                ? "failed"
                 : isDone
                   ? "done"
                   : isActive
@@ -1245,14 +1315,18 @@ export function ChainrailsSellPanel({
           <div className="row between center wrap" style={{ gap: 18 }}>
             <div className="col">
               <span className="muted" style={{ fontSize: 12 }}>
-                You sell
+                You send
               </span>
               <span
                 className="font-mono tabular row center gap-2"
                 style={{ fontSize: 30, fontWeight: 500, letterSpacing: "-0.015em" }}
               >
                 <AssetLogo name={tokenLogo(quote.cryptoCurrency)} size={22} />
-                {formatToken(quote.cryptoAmount, quote.cryptoCurrency, 2)}
+                {formatToken(
+                  Number(quote.grossDepositAmount) || quote.cryptoAmount,
+                  quote.cryptoCurrency,
+                  2
+                )}
               </span>
               <span
                 className="muted font-mono"
@@ -1290,6 +1364,44 @@ export function ChainrailsSellPanel({
               </span>
             </div>
           </div>
+          {/* Fees arrive with the quote, so they're shown here, not on the
+              amount screen. */}
+          <dl className="m-0 mt-5 flex flex-col gap-2 border-t border-edge-soft pt-4 text-sm">
+            {/* The fee in the token: what you send − the amount converted.
+                ChainRails only reports it in fiat (totalFeesFiat), which reads
+                oddly on a sell, so that's the fallback. */}
+            {(() => {
+              const feeToken =
+                Number(quote.grossDepositAmount) - Number(quote.cryptoAmount);
+              const feeFiat = Number(quote.totalFeesFiat);
+              if (feeToken > 0)
+                return (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted">Fee</dt>
+                    <dd className="m-0 font-medium">
+                      {formatToken(feeToken, quote.cryptoCurrency, 2)}
+                    </dd>
+                  </div>
+                );
+              if (feeFiat > 0)
+                return (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted">Fee</dt>
+                    <dd className="m-0 font-medium">
+                      {fiatSymbol(quote.fiatCurrency)}
+                      {formatNumber(feeFiat)}
+                    </dd>
+                  </div>
+                );
+              return null;
+            })()}
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted">Amount converted</dt>
+              <dd className="m-0 font-medium">
+                {formatToken(quote.cryptoAmount, quote.cryptoCurrency, 2)}
+              </dd>
+            </div>
+          </dl>
         </div>
 
         {/* Verify once (per-profile KYC, reused across Buy + Sell), then the
@@ -1518,186 +1630,154 @@ export function ChainrailsSellPanel({
     );
   }
 
-  // ----- Form --------------------------------------------------------------
+  // ----- Form (same layout as the Paycrest amount screen) ------------------
+  // Fees come back with the quote, so they show on the next step; this screen
+  // shows the address ChainRails needs instead.
+  const toOption = (c: RampCountry): CountryOption => ({
+    value: c.countryCode,
+    countryCode: c.countryCode,
+    countryName: c.name,
+    currencyCode: c.currency.code,
+    currencyName: c.currency.name,
+  });
+  const popular = countries.filter((c) => isPaycrestFiat(c.currency.code));
+  const others = countries.filter((c) => !isPaycrestFiat(c.currency.code));
+  const blocker = !country
+    ? "Choose a country"
+    : !(cryptoAmount > 0)
+      ? "Enter an amount"
+      : belowMin
+        ? `Minimum is ${country.currency.minAmount} ${token}`
+        : !senderValid
+          ? `Enter your ${source.label} address`
+          : null;
+
   return (
-    <div className="card col gap-5" style={{ padding: 20 }}>
-      <label className="col gap-2">
-        <span style={FORM_LABEL}>You sell</span>
-        <div className="row center gap-2">
-          <PrefixedAmountInput
-            amount={amount}
-            onAmountChange={onAmountChange}
-            prefix="$"
-          />
-          <div className="row center gap-1" style={{ flex: "0 0 auto" }}>
-            {(["USDC", "USDT"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  onTokenChange(t);
-                }}
-                style={{
-                  cursor: "pointer",
-                  padding: "8px 14px",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  lineHeight: 1.2,
-                  borderRadius: 999,
-                  border: "1px solid",
-                  background: token === t ? "var(--btn-bg)" : "var(--bg-elev)",
-                  color: token === t ? "var(--btn-fg)" : "var(--fg-soft)",
-                  borderColor: token === t ? "var(--btn-bg)" : "var(--line-2)",
-                }}
-              >
-                <TokenLogo symbol={t} size={16} />
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-        {unitRate && country ? (
-          <>
-            <div
-              className="row center gap-2"
-              style={{ fontSize: 12.5, padding: "0 2px" }}
-            >
-              {estimate !== null && (
-                <span style={{ color: "var(--accent)", fontWeight: 500 }}>
-                  ≈ {formatNumber(estimate)} {country.currency.code}
-                </span>
-              )}
-              <span className="muted tabular">
-                {estimate !== null
-                  ? `(1 ${token} = ${formatNumber(unitRate)} ${country.currency.code})`
-                  : `1 ${token} = ${formatNumber(unitRate)} ${country.currency.code}`}
-              </span>
-            </div>
-            {estimate !== null && (
-              <span
-                className="muted"
-                style={{ fontSize: 11, padding: "0 2px", opacity: 0.85 }}
-              >
-                Estimate · final rate locks when you create the order
-              </span>
-            )}
-          </>
-        ) : noRate && token === "USDT" ? (
-          <span style={{ fontSize: 12, color: "var(--pend)" }}>
+    <div className="flex flex-col">
+      <AmountField
+        id="cr-sell-amount"
+        label="You send"
+        value={amount}
+        onChange={onAmountChange}
+        pill={chainPicker}
+      >
+        {noRate && token === "USDT" && (
+          <p className="text-[13px] leading-snug text-warn-ink">
             USDT can&apos;t be sold from {source.label} here. Switch to USDC or
             pick another chain.
-          </span>
-        ) : (
-          <span className="muted" style={{ fontSize: 12 }}>
-            {token} amount on {source.label}. The payout is shown in the live
-            quote.
-          </span>
+          </p>
         )}
-      </label>
+      </AmountField>
 
-      {networkSelect && (
-        <label className="col gap-2">
-          <span style={FORM_LABEL}>From</span>
-          {networkSelect}
-        </label>
-      )}
+      <RateLine
+        approximate
+        rate={
+          unitRate && country
+            ? {
+                from: `1 ${token}`,
+                to: `${formatNumber(unitRate)} ${country.currency.code}`,
+              }
+            : null
+        }
+      />
 
-      <label className="col gap-2">
-        <span style={FORM_LABEL}>Recipient gets paid in</span>
-        <select
-          value={countryCode}
-          onChange={(e) => setCountryCode(e.target.value)}
-          disabled={loading}
-          style={INPUT}
-        >
-          {!country && (
-            <option value="" disabled>
-              Choose a country…
-            </option>
-          )}
-          {countries.map((c) => (
-            <option key={c.countryCode} value={c.countryCode}>
-              {countryFlag(c.countryCode)} {c.name} · {c.currency.code}
-            </option>
-          ))}
-        </select>
-        {belowMin && country && (
-          <span style={{ fontSize: 12, color: "var(--pend)" }}>
-            Minimum to {country.name} is {country.currency.minAmount} {token}.
-          </span>
-        )}
-      </label>
-
-      {/* ChainRails requires the sender address for a sell (it's where a
-          refund would go). With a wallet connected we already know it, so
-          show one quiet line instead of an input. */}
-      {usingWalletAddress && !editSender ? (
-        <div className="row center gap-2" style={{ fontSize: 13 }}>
-          <span className="muted">Sending from</span>
-          <span className="font-mono">
-            {senderAddress.slice(0, 6)}…{senderAddress.slice(-4)}
-          </span>
-          <button
-            type="button"
-            className="btn btn-quiet btn-sm"
-            onClick={() => setEditSender(true)}
-            style={{ padding: "0 6px" }}
-          >
-            Change
-          </button>
-        </div>
-      ) : (
-        <label className="col gap-2">
-          <div className="row center gap-1">
-            <span style={FORM_LABEL}>Sending from</span>
-            <InfoHint
-              text={`The ${source.label} address you'll send from. If anything goes wrong, a refund goes back here.`}
+      <AmountField
+        id="cr-sell-receive"
+        label="They receive"
+        readOnly
+        prefix="≈"
+        value={estimate !== null ? formatNumber(estimate) : ""}
+        pill={
+          <div className="relative">
+            {country ? (
+              <CurrencyPill
+                countryCode={country.countryCode}
+                currencyCode={country.currency.code}
+                countryName={country.name}
+                currencyName={country.currency.name}
+                onClick={() => setCurrencyOpen((v) => !v)}
+              />
+            ) : (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setCurrencyOpen((v) => !v)}
+                className="h-12 rounded-full border border-edge bg-pill px-4 text-sm font-semibold"
+              >
+                Choose country
+              </button>
+            )}
+            <CurrencyPicker
+              open={currencyOpen}
+              onClose={() => setCurrencyOpen(false)}
+              title="Recipient gets paid in"
+              value={countryCode}
+              popular={popular.map(toOption)}
+              all={others.map(toOption)}
+              storageKey="sell-cr"
+              onSelect={(o) => setCountryCode(o.value)}
             />
           </div>
-          <input
-            value={senderAddress}
-            onChange={(e) => setSenderAddress(e.target.value)}
-            placeholder={`Your ${source.label} wallet address`}
-            spellCheck={false}
-            autoComplete="off"
-            style={INPUT}
-          />
-          {senderAddress.trim() && !senderValid && (
-            <span style={{ fontSize: 12, color: "var(--err)" }}>
-              That doesn&apos;t look like a valid {source.label} address.
-            </span>
-          )}
+        }
+      >
+        {belowMin && country && (
+          <p className="text-[13px] leading-snug text-warn-ink">
+            Minimum to {country.name} is {country.currency.minAmount} {token}.
+          </p>
+        )}
+      </AmountField>
+
+      {/* ChainRails needs the sender address for a sell (refunds go there).
+          Prefilled with the connected wallet, always editable. */}
+      <div className="mt-4 flex flex-col gap-1.5 rounded-2xl border border-edge bg-subtle px-5 py-3 text-sm">
+        <label htmlFor="cr-sender" className="text-muted">
+          Sending from
         </label>
+        <input
+          id="cr-sender"
+          value={senderAddress}
+          onChange={(e) => setSenderAddress(e.target.value)}
+          placeholder={`Your ${source.label} wallet address`}
+          spellCheck={false}
+          autoComplete="off"
+          className="h-11 w-full rounded-xl border border-edge bg-card px-3 font-mono text-[13px] text-ink outline-none placeholder:text-muted focus:border-ink"
+        />
+        <span className="text-[13px] text-muted">
+          {senderAddress.trim() && !senderValid
+            ? `That doesn't look like a valid ${source.label} address.`
+            : "This wallet address will be used for any refunds."}
+        </span>
+      </div>
+      {estimate !== null && (
+        <p className="mt-2 px-1 text-xs text-muted">
+          Estimate · fees and the final rate show on the next step
+        </p>
       )}
 
       {(error ?? countriesError) && (
-        <ErrorBox message={(error ?? countriesError) as string} />
+        <div className="mt-3">
+          <Notice tone="error">{(error ?? countriesError) as string}</Notice>
+        </div>
       )}
 
-      <button
-        className="btn btn-fat"
-        disabled={loading || quoting || !canQuote}
+      <PrimaryButton
+        disabled={loading || !canQuote}
+        loading={quoting}
         onClick={getQuote}
-        style={{
-          background: canQuote ? "var(--btn-bg)" : "var(--bg-sunk)",
-          color: canQuote ? "var(--btn-fg)" : "var(--fg-faint)",
-          cursor: canQuote && !quoting ? "pointer" : "default",
-        }}
       >
         {quoting ? (
-          <>
-            <Icon.Spinner size={14} /> Getting live quote…
-          </>
+          "Getting quote…"
+        ) : blocker ? (
+          blocker
         ) : (
           <>
-            Continue <Icon.ArrowRight />
+            Continue to recipient <ArrowRight />
           </>
         )}
-      </button>
+      </PrimaryButton>
+      <Reassurance>
+        You&apos;ll review everything before anything leaves your wallet.
+      </Reassurance>
     </div>
   );
 }
@@ -1818,12 +1898,6 @@ function ErrorBox({ message }: { message: string }) {
     </div>
   );
 }
-
-/** Plain sentence-case label for the quote form fields. */
-const FORM_LABEL: React.CSSProperties = {
-  fontSize: 13,
-  color: "var(--fg-mute)",
-};
 
 const INPUT: React.CSSProperties = {
   width: "100%",

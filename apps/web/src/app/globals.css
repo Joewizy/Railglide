@@ -1,5 +1,36 @@
 @import "tailwindcss";
 
+/* Send/Buy flow design tokens (from /apps/design). Tailwind v4 turns these
+   into classes: bg-page, border-edge, text-muted, rounded-card, etc. */
+@theme {
+  --color-page: #f5f3ee;
+  --color-card: #ffffff;
+  --color-edge: #e6e2d9;
+  --color-edge-soft: #efebe3;
+  --color-muted: #5f5c55;
+  --color-ink: #17171a;
+  --color-ink-soft: #4a4842;
+  --color-success: #1f8a55;
+  --color-danger: #b42318;
+  --color-warn-bg: #fff4e5;
+  --color-warn-ink: #5a3a0a;
+  --color-warn-strong: #3d2706;
+  --color-warn-edge: #e2c9a0;
+  --color-info-bg: #eef3fb;
+  --color-info-ink: #1c3b73;
+  --color-info-strong: #12294f;
+  --color-pill: #f7f5f0;
+  --color-subtle: #fbfaf7;
+  --color-chip: #f1ede4;
+  --color-step-line: #dcd7cc;
+  --color-step-ring: #cfc9bd;
+  --color-disabled: #e7e3da;
+  --color-placeholder: #b3aea4;
+  --radius-card: 20px;
+  --radius-button: 16px;
+  --font-inter: Inter, system-ui, sans-serif;
+}
+
 /* ========================================================================
    Railglide — design tokens (v2)
    Light by default. Warm off-white base, one confident coral accent.

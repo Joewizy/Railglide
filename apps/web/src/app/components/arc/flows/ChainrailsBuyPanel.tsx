@@ -5,9 +5,9 @@
  *
  * Paycrest is our #1 on-ramp; this panel only renders for the ChainRails-only
  * destinations (Optimism, Avalanche, Solana, Monad, HyperEVM, Tron). It builds
- * the same `Quote` shape the Paycrest flow does and hands it up so the shared
- * <ReviewScreen> renders the confirm step — one consistent order-details card,
- * and it collects the delivery address there (validated per chain format).
+ * the same `Quote` shape the Paycrest flow does, with the delivery address
+ * already filled in, and hands it up — the parent goes straight to the order
+ * page (no separate review screen; this screen already shows the amounts).
  *
  * UX matches the Paycrest flow: the user types a FIAT amount and sees the ≈USDC
  * they'll receive below. Chainrails quotes are crypto-amount-driven and it has
@@ -16,19 +16,33 @@
  */
 
 import React, { useEffect, useState } from "react";
-import { countryFlag, formatNumber, formatToken } from "@/utils";
+import { useAccount } from "wagmi";
+import { cachedFetch, ONE_HOUR } from "@/lib/cachedFetch";
+import { formatNumber, formatToken, titleCase } from "@/utils";
 import {
   isBelowRampMinimum,
+  isValidRampAddress,
   rampMinimum,
   type RampCountry,
   type RampDestination,
 } from "@/rails/chainrails";
 import { useRampCountries } from "@/hooks/useRampCountries";
-import { type PaycrestInstitution } from "@/rails/paycrest";
+import { isPaycrestFiat, type PaycrestInstitution } from "@/rails/paycrest";
 import type { TokenSymbol } from "@/config/network";
-import { PrefixedAmountInput } from "./PrefixedAmountInput";
-import { type Quote, AccountNameStatus } from "../SendScreen";
-import { Icon } from "../icons";
+import { type Quote } from "../SendScreen";
+import {
+  AmountField,
+  ArrowRight,
+  CheckIcon,
+  ChevronDown,
+  CurrencyPill,
+  Notice,
+  PrimaryButton,
+  RateLine,
+  Reassurance,
+} from "../ui/sendKit";
+import { CurrencyPicker, type CountryOption } from "../ui/sendPickers";
+import { PickerSheet } from "../ui/PickerSheet";
 import { EMAIL_RE, loadSavedEmail, saveEmail } from "../rampEmail";
 import {
   clearChainrailsRampDraft,
@@ -97,17 +111,17 @@ const RATE_PROBE_CRYPTO = 10;
 export function ChainrailsBuyPanel({
   destination,
   onQuote,
-  networkSelect,
+  chainPicker,
   amount,
   onAmountChange,
   countryCode: chosenCountry,
   onCountryChange,
 }: {
   destination: RampDestination;
-  /** Hand the built quote up so the shared ReviewScreen renders the confirm. */
+  /** Hand the built quote (address included) up to create the order. */
   onQuote: (quote: Quote) => void;
-  /** The shared "Receive on" network picker, rendered inside this card. */
-  networkSelect: React.ReactNode;
+  /** The parent's token + chain pill, shown in the "You receive" field. */
+  chainPicker: React.ReactNode;
   /** The FIAT amount the user pays, owned by the parent so it survives switching
    *  between the Paycrest form and this panel. */
   amount: string;
@@ -129,6 +143,17 @@ export function ChainrailsBuyPanel({
     if (onCountryChange && next) onCountryChange(next);
     else setOwnCountry(code);
   };
+  const [currencyOpen, setCurrencyOpen] = useState(false);
+  const [bankOpen, setBankOpen] = useState(false);
+  // Where the USDC is delivered. Prefilled with the connected wallet on EVM
+  // chains (the only address the wallet gives us); pasted for Solana/Tron.
+  const { address: connectedAddress } = useAccount();
+  const [recipient, setRecipient] = useState("");
+  useEffect(() => {
+    if (destination.addressKind === "evm" && connectedAddress)
+      setRecipient((cur) => cur || connectedAddress);
+  }, [destination.addressKind, connectedAddress]);
+  const recipientValid = isValidRampAddress(destination.addressKind, recipient);
   const [unitRate, setUnitRate] = useState<number | null>(null); // fiat per 1 USDC
   const [rateLoading, setRateLoading] = useState(false);
   const [quoting, setQuoting] = useState(false);
@@ -177,7 +202,10 @@ export function ChainrailsBuyPanel({
 
   // Fall back to the first country if ours isn't in the list.
   useEffect(() => {
-    if (countries.length && !countries.some((c) => c.countryCode === ownCountry))
+    if (
+      countries.length &&
+      !countries.some((c) => c.countryCode === ownCountry)
+    )
       setOwnCountry(countries[0].countryCode);
   }, [countries, ownCountry]);
 
@@ -191,7 +219,11 @@ export function ChainrailsBuyPanel({
     setRefundBanks([]);
     if (!refundCurrency) return;
     let cancelled = false;
-    fetch(`/api/paycrest/institutions?currency=${encodeURIComponent(refundCurrency)}`)
+    cachedFetch(
+      `/api/paycrest/institutions?currency=${encodeURIComponent(refundCurrency)}`,
+      {},
+      ONE_HOUR
+    )
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok || cancelled) return;
@@ -236,7 +268,10 @@ export function ChainrailsBuyPanel({
           setVerifyError(data?.error || "Couldn't verify this account.");
           setFieldValues((p) => ({ ...p, refundAccountName: "" }));
         } else {
-          setFieldValues((p) => ({ ...p, refundAccountName: data.accountName }));
+          setFieldValues((p) => ({
+            ...p,
+            refundAccountName: data.accountName,
+          }));
         }
       } catch {
         if (!cancelled) {
@@ -262,7 +297,8 @@ export function ChainrailsBuyPanel({
     // carry the last country's fields over while this one loads.
     setFields([]);
     setRateLoading(true);
-    fetch("/api/chainrails/ramp/quote", {
+    // Cached for a minute: flipping between chains/countries reuses it.
+    cachedFetch("/api/chainrails/ramp/quote", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -312,7 +348,8 @@ export function ChainrailsBuyPanel({
     !!unitRate &&
     !belowMin &&
     fieldsComplete &&
-    emailValid;
+    emailValid &&
+    recipientValid;
 
   const buildQuote = (r: RampQuote, c: RampCountry): Quote => ({
     from: { token: r.fiatCurrency, chain: c.name, amount: r.fiatAmount },
@@ -352,7 +389,7 @@ export function ChainrailsBuyPanel({
       toChain: destination.chainId,
       toToken: "USDC",
       fiatCurrency: r.fiatCurrency,
-      recipient: null,
+      recipient: recipient.trim(),
       chainrailsRamp: {
         provider: r.provider,
         countryCode,
@@ -400,104 +437,182 @@ export function ChainrailsBuyPanel({
     }
   };
 
+  // Picker rows: Paycrest corridors first, then the rest alphabetically.
+  const toOption = (c: RampCountry): CountryOption => ({
+    value: c.countryCode,
+    countryCode: c.countryCode,
+    countryName: c.name,
+    currencyCode: c.currency.code,
+    currencyName: c.currency.name,
+  });
+  const popular = countries.filter((c) => isPaycrestFiat(c.currency.code));
+  const others = countries.filter((c) => !isPaycrestFiat(c.currency.code));
+
+  // The button says what's missing, in order.
+  const blocker = !country
+    ? "Choose a country"
+    : !(fiatAmount > 0)
+      ? "Enter an amount"
+      : !unitRate
+        ? rateLoading
+          ? "Loading rate…"
+          : "No live rate right now"
+        : belowMin
+          ? "Below the minimum"
+          : !recipientValid
+            ? `Enter your ${destination.label} wallet address`
+            : !fieldsComplete
+              ? "Fill in the refund account"
+              : !emailValid
+                ? "Enter your email"
+                : null;
+
+  const inputClass =
+    "h-12 w-full rounded-[14px] border border-edge bg-card px-3.5 text-[15px] text-ink outline-none placeholder:text-muted focus:border-ink focus:shadow-[0_0_0_3px_rgba(23,23,26,0.08)]";
+
   return (
-    <div className="card col gap-5" style={{ padding: 20 }}>
-      <label className="col gap-2">
-        <span style={LABEL}>
-          You pay
-        </span>
-        <PrefixedAmountInput
-          amount={amount}
-          onAmountChange={onAmountChange}
-          prefix={country?.currency.symbol ?? "₦"}
+    <div className="flex flex-col">
+      <AmountField
+        id="cr-buy-amount"
+        label="You pay"
+        value={amount}
+        onChange={onAmountChange}
+        pill={
+          <div className="relative">
+            {country ? (
+              <CurrencyPill
+                countryCode={country.countryCode}
+                currencyCode={country.currency.code}
+                countryName={country.name}
+                currencyName={country.currency.name}
+                onClick={() => setCurrencyOpen((v) => !v)}
+              />
+            ) : (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setCurrencyOpen((v) => !v)}
+                className="h-12 rounded-full border border-edge bg-pill px-4 text-sm font-semibold"
+              >
+                Choose country
+              </button>
+            )}
+            <CurrencyPicker
+              open={currencyOpen}
+              onClose={() => setCurrencyOpen(false)}
+              title="Pay with"
+              value={countryCode}
+              popular={popular.map(toOption)}
+              all={others.map(toOption)}
+              storageKey="buy-cr"
+              onSelect={(o) => setCountryCode(o.value)}
+            />
+          </div>
+        }
+      >
+        {belowMin && country && minimum && (
+          <p className="text-[13px] leading-snug text-warn-ink">
+            Minimum is
+            {minimum.fiat !== null &&
+              ` about ${country.currency.symbol}${formatNumber(minimum.fiat)}`}{" "}
+            ({minimum.usdc} USDC).
+          </p>
+        )}
+      </AmountField>
+
+      {!rateLoading && country && !unitRate ? (
+        <p className="px-1 py-2.5 text-[13px] text-warn-ink">
+          Couldn&apos;t load a live rate for {destination.label} in{" "}
+          {country.currency.code} right now.
+        </p>
+      ) : (
+        <RateLine
+          approximate
+          rate={
+            unitRate && country
+              ? {
+                  from: "1 USDC",
+                  to: `${formatNumber(unitRate)} ${country.currency.code}`,
+                }
+              : null
+          }
         />
-        {unitRate && estimateUsdc !== null && (
-          <div
-            className="row center gap-2"
-            style={{ fontSize: 12.5, padding: "0 2px" }}
+      )}
+
+      <AmountField
+        id="cr-buy-receive"
+        label="You receive"
+        readOnly
+        prefix="≈"
+        value={estimateUsdc !== null ? formatNumber(estimateUsdc) : ""}
+        pill={chainPicker}
+      />
+
+      {/* Delivery address, refund account and anything else the provider
+          needs, in one box. */}
+      <div className="mt-4 flex flex-col gap-4 rounded-card border border-edge bg-card px-5 py-4">
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="cr-recipient"
+            className="text-[13px] font-medium text-muted"
           >
-            <span style={{ color: "var(--accent)", fontWeight: 500 }}>
-              You receive ≈ {formatToken(estimateUsdc, "USDC", 2)}
+            Receive USDC to
+          </label>
+          <input
+            id="cr-recipient"
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value)}
+            placeholder={`Your ${destination.label} wallet address`}
+            spellCheck={false}
+            autoComplete="off"
+            className={`${inputClass} font-mono text-[13px]`}
+          />
+          {recipient.trim() && !recipientValid && (
+            <span className="text-[13px] text-danger">
+              That doesn&apos;t look like a valid {destination.label} address.
             </span>
-            <span className="muted font-mono tabular">
-              (1 USDC = {formatNumber(unitRate)} {country?.currency.code})
-            </span>
+          )}
+        </div>
+        {fields.length > 0 && (
+          <div className="flex flex-col gap-0.5 border-t border-edge-soft pt-4">
+            <h2 className="text-[15px] font-semibold">Refund account</h2>
+            <p className="text-[13px] text-muted">
+              This account will be used for any refunds.
+            </p>
           </div>
         )}
-        {unitRate && estimateUsdc !== null && (
-          <span
-            className="muted"
-            style={{ fontSize: 11, padding: "0 2px", opacity: 0.85 }}
-          >
-            Estimate · final rate locks when you create the order
-          </span>
-        )}
-        {!rateLoading && country && !unitRate && (
-          <span style={{ fontSize: 12, color: "var(--pend)" }}>
-            Couldn&apos;t load a live rate for {destination.label} in{" "}
-            {country.currency.code} right now.
-          </span>
-        )}
-      </label>
+        {fields.map((f) => {
+          const isRefundBank = f.key === "refundInstitution";
 
-      <label className="col gap-2">
-        <span style={LABEL}>
-          Paying with
-        </span>
-        <select
-          value={countryCode}
-          onChange={(e) => setCountryCode(e.target.value)}
-          disabled={loading}
-          style={INPUT}
-        >
-          {!country && (
-            <option value="" disabled>
-              Choose your country…
-            </option>
-          )}
-          {countries.map((c) => (
-            <option key={c.countryCode} value={c.countryCode}>
-              {countryFlag(c.countryCode)} {c.name} · {c.currency.code}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="col gap-2">
-        <span style={LABEL}>
-          Receive
-        </span>
-        {networkSelect}
-        <span className="muted" style={{ fontSize: 12 }}>
-          Your USDC is delivered straight to your {destination.label} address.
-        </span>
-      </label>
-
-      {/* Provider fields the order requires (bank dropdown, phone, account). */}
-      {fields.map((f) => {
-        // The refund institution is a bank code — show a name dropdown and send
-        // the code for the user, so they never have to know or type it.
-        const isRefundBank = f.key === "refundInstitution";
-
-        // The refund account name is resolved from the bank + number. If the
-        // lookup can't confirm it, we fall back to a plain text box so a miss
-        // never blocks the order.
-        if (f.key === "refundAccountName") {
-          const ready =
-            !!fieldValues.refundInstitution &&
-            (fieldValues.refundAccountIdentifier?.trim().length ?? 0) >= 6;
-          // Until there's an account to look up, show nothing — the name is a
-          // result we resolve, not another box to fill.
-          if (!ready) return null;
-          const needsManual = ready && !verifying && !!verifyError;
-          return (
-            <div key={f.key} className="col gap-2">
-              <span style={LABEL}>
-                Refund account name
-              </span>
-              {needsManual ? (
-                <>
+          // The account name is looked up from bank + number; typed only
+          // when the lookup can't confirm it.
+          if (f.key === "refundAccountName") {
+            const ready =
+              !!fieldValues.refundInstitution &&
+              (fieldValues.refundAccountIdentifier?.trim().length ?? 0) >= 6;
+            if (!ready) return null;
+            if (verifying) {
+              return (
+                <p
+                  key={f.key}
+                  className="flex items-center gap-2 text-[13px] text-muted"
+                >
+                  <span className="size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  Checking account…
+                </p>
+              );
+            }
+            if (verifyError) {
+              return (
+                <div key={f.key} className="flex flex-col gap-1.5">
+                  <label
+                    htmlFor={`cr-${f.key}`}
+                    className="text-[13px] font-medium text-muted"
+                  >
+                    Account holder&apos;s name
+                  </label>
                   <input
+                    id={`cr-${f.key}`}
                     value={fieldValues.refundAccountName ?? ""}
                     onChange={(e) =>
                       setFieldValues((p) => ({
@@ -505,155 +620,194 @@ export function ChainrailsBuyPanel({
                         refundAccountName: e.target.value,
                       }))
                     }
-                    placeholder="Enter the account name"
-                    style={INPUT}
+                    placeholder="Name on the account"
+                    className={inputClass}
                   />
-                  <span className="muted" style={{ fontSize: 11.5 }}>
-                    We couldn&apos;t confirm this account automatically — type the
-                    name exactly as it appears at the bank.
+                  <span className="text-[13px] text-muted">
+                    We couldn&apos;t confirm this account. Type the name as it
+                    appears at the bank.
                   </span>
-                </>
+                </div>
+              );
+            }
+            const name = fieldValues.refundAccountName ?? "";
+            if (!name) return null;
+            return (
+              <div
+                key={f.key}
+                role="status"
+                className="flex items-start gap-3 rounded-[14px] border border-[#bfdccb] bg-[#eef6f1] p-3.5"
+              >
+                <span className="grid size-6 flex-none place-items-center rounded-full bg-success text-white">
+                  <CheckIcon size={13} />
+                </span>
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-[15px] font-semibold text-[#134a30]">
+                    {titleCase(name)}
+                  </span>
+                  <span className="text-[13px] text-[#2e5e45]">
+                    Name confirmed. Check this is your account.
+                  </span>
+                </div>
+              </div>
+            );
+          }
+
+          if (isRefundBank && refundBanks.length > 0) {
+            const bank = refundBanks.find((b) => b.code === fieldValues[f.key]);
+            return (
+              <div key={f.key} className="flex flex-col gap-1.5">
+                <span className="text-[13px] font-medium text-muted">
+                  Refund bank
+                </span>
+                <div className="relative">
+                  <button
+                    type="button"
+                    aria-haspopup="listbox"
+                    onClick={() => setBankOpen((v) => !v)}
+                    className="flex h-12 w-full items-center gap-3 rounded-[14px] border border-edge bg-card px-3.5 text-left"
+                  >
+                    <span
+                      className={`flex-1 truncate text-[15px] ${bank ? "font-medium" : "text-muted"}`}
+                    >
+                      {bank?.name ?? "Choose your bank"}
+                    </span>
+                    <ChevronDown />
+                  </button>
+                  <PickerSheet
+                    open={bankOpen}
+                    onClose={() => setBankOpen(false)}
+                    title="Refund bank"
+                    value={fieldValues[f.key] ?? ""}
+                    searchPlaceholder="Search banks"
+                    groups={[
+                      {
+                        label: "Banks",
+                        items: refundBanks.map((b) => ({
+                          value: b.code,
+                          title: b.name,
+                          logo: (
+                            <span
+                              aria-hidden
+                              className="grid size-7 flex-none place-items-center rounded-lg bg-chip text-[13px] font-bold text-ink-soft"
+                            >
+                              {b.name.charAt(0).toUpperCase()}
+                            </span>
+                          ),
+                        })),
+                      },
+                    ]}
+                    onSelect={(code) =>
+                      setFieldValues((p) => ({ ...p, [f.key]: code }))
+                    }
+                  />
+                </div>
+              </div>
+            );
+          }
+
+          const label =
+            f.key === "refundAccountIdentifier"
+              ? "Refund account number"
+              : isRefundBank
+                ? "Refund bank"
+                : f.label;
+          return (
+            <div key={f.key} className="flex flex-col gap-1.5">
+              <label
+                htmlFor={`cr-${f.key}`}
+                className="text-[13px] font-medium text-muted"
+              >
+                {label}
+              </label>
+              {f.type === "enum" ? (
+                <select
+                  id={`cr-${f.key}`}
+                  value={fieldValues[f.key] ?? ""}
+                  onChange={(e) =>
+                    setFieldValues((p) => ({ ...p, [f.key]: e.target.value }))
+                  }
+                  className={`${inputClass} cursor-pointer`}
+                >
+                  {(f.options ?? []).map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
               ) : (
-                <AccountNameStatus
-                  verifying={verifying}
-                  error={verifyError}
-                  name={fieldValues.refundAccountName ?? ""}
+                <input
+                  id={`cr-${f.key}`}
+                  value={fieldValues[f.key] ?? ""}
+                  onChange={(e) =>
+                    setFieldValues((p) => ({ ...p, [f.key]: e.target.value }))
+                  }
+                  inputMode={
+                    f.type === "phone" || f.key === "refundAccountIdentifier"
+                      ? "tel"
+                      : undefined
+                  }
+                  autoComplete="off"
+                  placeholder={label}
+                  className={inputClass}
                 />
               )}
             </div>
           );
-        }
+        })}
 
-        return (
-          <label key={f.key} className="col gap-2">
-            <span style={LABEL}>
-              {isRefundBank ? "Refund bank" : f.label}
-            </span>
-            {isRefundBank && refundBanks.length > 0 ? (
-              <select
-                value={fieldValues[f.key] ?? ""}
-                onChange={(e) =>
-                  setFieldValues((p) => ({ ...p, [f.key]: e.target.value }))
-                }
-                style={INPUT}
-              >
-                <option value="" disabled>
-                  Select your bank
-                </option>
-                {refundBanks.map((b) => (
-                  <option key={b.code} value={b.code}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
-            ) : f.type === "enum" ? (
-              <select
-                value={fieldValues[f.key] ?? ""}
-                onChange={(e) =>
-                  setFieldValues((p) => ({ ...p, [f.key]: e.target.value }))
-                }
-                style={INPUT}
-              >
-                {(f.options ?? []).map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                value={fieldValues[f.key] ?? ""}
-                onChange={(e) =>
-                  setFieldValues((p) => ({ ...p, [f.key]: e.target.value }))
-                }
-                inputMode={f.type === "phone" ? "tel" : undefined}
-                placeholder={f.label}
-                style={INPUT}
-              />
-            )}
-          </label>
-        );
-      })}
+        {/* Asked once; afterwards remembered on-device and hidden. */}
+        {askEmail && (
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="cr-email"
+              className="text-[13px] font-medium text-muted"
+            >
+              Email (for receipts)
+            </label>
+            <input
+              id="cr-email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              inputMode="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              className={inputClass}
+            />
+          </div>
+        )}
+      </div>
 
-      {/* Asked once; afterwards it's remembered on-device and this is hidden. */}
-      {askEmail && (
-        <label className="col gap-2">
-          <span style={LABEL}>
-            Email (for KYC &amp; receipts)
-          </span>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            inputMode="email"
-            placeholder="you@example.com"
-            style={INPUT}
-          />
-        </label>
+      {unitRate && estimateUsdc !== null && (
+        <p className="mt-2 px-1 text-xs text-muted">
+          Estimate · final rate locks when you create the order
+        </p>
       )}
 
-      {belowMin && country && minimum && (
-        <span style={{ fontSize: 12, color: "var(--pend)" }}>
-          Minimum is
-          {minimum.fiat !== null &&
-            ` about ${country.currency.symbol}${formatNumber(minimum.fiat)}`}{" "}
-          ({minimum.usdc} USDC).
-        </span>
-      )}
       {(error ?? countriesError) && (
-        <div
-          style={{
-            padding: "12px 14px",
-            background: "var(--err-soft)",
-            border: "1px solid var(--err)",
-            borderRadius: 10,
-            fontSize: 13,
-          }}
-        >
-          {error ?? countriesError}
+        <div className="mt-3">
+          <Notice tone="error">{(error ?? countriesError) as string}</Notice>
         </div>
       )}
 
-      <button
-        className="btn btn-fat"
-        disabled={loading || quoting || !canQuote}
+      <PrimaryButton
+        disabled={loading || !canQuote}
+        loading={quoting}
         onClick={getQuote}
-        style={{
-          background: canQuote ? "var(--btn-bg)" : "var(--bg-sunk)",
-          color: canQuote ? "var(--btn-fg)" : "var(--fg-faint)",
-          cursor: canQuote && !quoting && !rateLoading ? "pointer" : "default",
-        }}
       >
         {quoting ? (
-          <>
-            <Icon.Spinner size={14} /> Getting live quote…
-          </>
-        ) : rateLoading ? (
-          <>
-            <Icon.Spinner size={14} /> Loading rate…
-          </>
+          "Getting quote…"
+        ) : blocker ? (
+          blocker
         ) : (
           <>
-            Continue <Icon.ArrowRight />
+            Continue to payment <ArrowRight />
           </>
         )}
-      </button>
+      </PrimaryButton>
+      <Reassurance>
+        You&apos;ll see the exact amount to pay before anything is charged.
+      </Reassurance>
     </div>
   );
 }
-
-const INPUT: React.CSSProperties = {
-  width: "100%",
-  padding: "11px 12px",
-  background: "var(--bg-soft)",
-  border: "1px solid var(--line)",
-  borderRadius: 10,
-  color: "var(--fg)",
-  fontSize: 14,
-  outline: "none",
-};
-
-// Matches the Paycrest buy card's field labels.
-const LABEL: React.CSSProperties = {
-  fontSize: 13,
-  color: "var(--fg-mute)",
-};

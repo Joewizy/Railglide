@@ -6,8 +6,8 @@
  * The plain-language version of an off-ramp: how much, paid out in which
  * currency. No tokens-vs-chains mental model up front — the source defaults
  * to the settlement chain. Produces the same Quote the NL path does and
- * hands off to the shared ReviewScreen (which collects the bank / mobile
- * money details and runs the connect → confirm → execute flow).
+ * hands off to SellReview (which collects the bank / mobile money details)
+ * and then the shared StatusScreen.
  */
 
 import React, { useEffect, useRef, useState } from "react";
@@ -15,6 +15,7 @@ import toast from "react-hot-toast";
 import {
   DEFAULT_SETTLEMENT_CHAIN_ID,
   getChain,
+  getTokenAddress,
   resolveChain,
   type ChainId,
 } from "@/config/network";
@@ -32,8 +33,10 @@ import {
   type RampDestination,
 } from "@/rails/chainrails";
 import { useRampCountries } from "@/hooks/useRampCountries";
+import { useTokenSupport } from "@/hooks/useTokenSupport";
 import { ChainrailsSellPanel } from "./ChainrailsSellPanel";
-import { amountBeforeFee } from "@/config/fees";
+import { SellReview } from "./SellReview";
+import { PAYCREST_SENDER_FEE_PERCENT, amountBeforeFee } from "@/config/fees";
 import {
   getTrackedRampOrder,
   type TrackedRampOrder,
@@ -42,23 +45,19 @@ import { usePaycrestNetwork } from "@/hooks/usePaycrestNetwork";
 import { usePaycrestRate, useTokenBalance } from "@/hooks";
 import { fetchPaycrestRate } from "@/lib/paycrestRate";
 import {
-  countryFlag,
-  fiatOptionLabel,
+  FIAT_HOME_COUNTRY,
+  FIAT_NAMES,
   formatFiat,
   formatNumber,
   formatToken,
 } from "@/utils";
-import { PrefixedAmountInput } from "./PrefixedAmountInput";
 import {
-  ReviewScreen,
   quoteFromIntent,
   type Intent,
   type IntentResponse,
   type PayoutDetails,
   type Quote,
-  InfoHint,
 } from "../SendScreen";
-import { Icon } from "../icons";
 import {
   clearComposeDraft,
   clearFlowDraft,
@@ -79,75 +78,28 @@ import {
 import { useSwapFlowNav } from "../useSwapFlowNav";
 import { useSearchParams } from "next/navigation";
 import { ChainLogo, RampLogo, TokenLogo } from "../Web3Logo";
+import {
+  AmountField,
+  ArrowRight,
+  BalanceAside,
+  CurrencyPill,
+  FlowHeader,
+  FlowPage,
+  Notice,
+  PrimaryButton,
+  RateLine,
+  Reassurance,
+  StepProgress,
+  SummaryRows,
+  TokenChainPill,
+} from "../ui/sendKit";
+import {
+  CurrencyPicker,
+  TokenChainPicker,
+  type CountryOption,
+} from "../ui/sendPickers";
 
 const TOKENS = ["USDC", "USDT"] as const;
-
-/** Flat source-chain picker: Paycrest chains first, ChainRails-only after. */
-function SourceSelect({
-  sourceChain,
-  crDest,
-  onSelect,
-  style,
-}: {
-  sourceChain: ChainId;
-  crDest: RampDestination | null;
-  onSelect: (value: string) => void;
-  style?: React.CSSProperties;
-}) {
-  const value = crDest ? `cr:${crDest.chainrailsChain}` : sourceChain;
-  return (
-    <span
-      style={{
-        position: "relative",
-        display: "block",
-        width: "100%",
-        flex: style?.flex,
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          left: 12,
-          top: "50%",
-          zIndex: 1,
-          display: "inline-flex",
-          transform: "translateY(-50%)",
-          pointerEvents: "none",
-        }}
-      >
-        {crDest ? (
-          <RampLogo
-            chainrailsChain={crDest.chainrailsChain}
-            label={crDest.label}
-          />
-        ) : (
-          <ChainLogo
-            id={sourceChain}
-            label={getChain(sourceChain)?.name ?? sourceChain}
-          />
-        )}
-      </span>
-      <select
-        value={value}
-        onChange={(e) => onSelect(e.target.value)}
-        style={{ ...style, cursor: "pointer", paddingLeft: 42, flex: undefined }}
-      >
-        {PAYCREST_SELL_CHAIN_IDS.map((id) => (
-          <option key={id} value={id}>
-            {getChain(id)?.name ?? id}
-          </option>
-        ))}
-        {/* ChainRails-only sell chains stay hidden until off-ramp KYB clears. */}
-        {CHAINRAILS_OFFRAMP_ENABLED &&
-          CHAINRAILS_RAMP_DESTINATIONS.map((d) => (
-            <option key={d.chainrailsChain} value={`cr:${d.chainrailsChain}`}>
-              {d.label}
-            </option>
-          ))}
-      </select>
-    </span>
-  );
-}
 
 /** Quote lines (recipient amount + rate) derived from a unit rate. */
 function rateLines(
@@ -260,6 +212,29 @@ export function CashoutFlow({
   // the user can see what they have before getting a quote. Undefined until a
   // wallet is connected and the read resolves.
   const balance = useTokenBalance(token, sourceChain);
+  // A chain is offered only when the provider that will run the sell supports
+  // the token there (live list, see useTokenSupport) AND we have its address.
+  // ChainRails-only currencies (payCountry) sell through ChainRails.
+  const tokens = useTokenSupport();
+  const canSellOn = (id: ChainId) => {
+    if (!getTokenAddress(token, id)) return false;
+    if (payCountry === null) return tokens.paycrest(id, token);
+    const dest = chainrailsDestinationFor(id);
+    return !!dest && tokens.chainrails(dest.chainrailsChain, token);
+  };
+  // Switching USDC ↔ USDT: if the current chain doesn't carry that token,
+  // move to one that does (the picker only lists those).
+  const sourceOk = crDest
+    ? tokens.chainrails(crDest.chainrailsChain, token)
+    : canSellOn(sourceChain);
+  const firstOkChain = PAYCREST_SELL_CHAIN_IDS.find(canSellOn);
+  useEffect(() => {
+    if (sourceOk) return;
+    if (crDest) setCrDest(null);
+    else if (firstOkChain) setSourceChain(firstOkChain);
+  }, [sourceOk, crDest, firstOkChain]);
+  const [currencyOpen, setCurrencyOpen] = useState(false);
+  const [chainOpen, setChainOpen] = useState(false);
 
   // Live unit rate, fetched once per (currency, token) pair — we multiply it
   // locally as the user types so the Naira estimate updates with no extra API
@@ -489,32 +464,85 @@ export function CashoutFlow({
     setCrDest(null);
   };
 
-  const backButton = (
-    <button
-      className="btn btn-quiet btn-sm"
-      onClick={onHeaderBack}
-      style={{ padding: "0 8px", alignSelf: "flex-start", marginBottom: 4 }}
-    >
-      <Icon.Arrow rotate={180} size={12} /> Back
-    </button>
+  const sendSteps = ["Amount", "Recipient", "Send"];
+  const pageHeader = (
+    <>
+      <FlowHeader
+        title="Send money"
+        subtitle="Pay a bank or mobile money account with your stablecoins."
+      />
+      <StepProgress steps={sendSteps} current={0} />
+    </>
   );
-  const header = (
-    <header className="col gap-1">
-      {backButton}
-      <h1
-        style={{
-          fontSize: 28,
-          lineHeight: 1.1,
-          letterSpacing: "-0.02em",
-          fontWeight: 500,
-        }}
-      >
-        Sell
-      </h1>
-      <span className="muted" style={{ fontSize: 14 }}>
-        Send stablecoins to a bank or mobile money account.
-      </span>
-    </header>
+
+  // Currency picker rows: Paycrest corridors first, then every country
+  // ChainRails pays out to (one row per country, so XAF/XOF repeat).
+  const popularCountries: CountryOption[] = PAYCREST_FIAT.map((c) => ({
+    value: c,
+    countryCode: FIAT_HOME_COUNTRY[c]?.countryCode ?? "",
+    countryName: FIAT_HOME_COUNTRY[c]?.countryName ?? c,
+    currencyCode: c,
+    currencyName: FIAT_NAMES[c] ?? c,
+  }));
+  const otherCountries: CountryOption[] = moreCountries.map((c) => ({
+    value: `cr:${c.countryCode}`,
+    countryCode: c.countryCode,
+    countryName: c.name,
+    currencyCode: c.currency.code,
+    currencyName: c.currency.name,
+  }));
+  const selectedCountry =
+    popularCountries.find((o) => o.value === currency) ?? popularCountries[0];
+
+  // Chains for the token/chain picker: Paycrest chains, then ChainRails-only
+  // ones (hidden until off-ramp KYB clears).
+  const chainOptions = [
+    ...PAYCREST_SELL_CHAIN_IDS.filter(canSellOn).map((id) => {
+      const name = getChain(id)?.name ?? id;
+      return { value: id, label: name, logo: <ChainLogo id={id} label={name} size={28} /> };
+    }),
+    ...(CHAINRAILS_OFFRAMP_ENABLED
+      ? CHAINRAILS_RAMP_DESTINATIONS.filter((d) =>
+          tokens.chainrails(d.chainrailsChain, token)
+        ).map((d) => ({
+          value: `cr:${d.chainrailsChain}`,
+          label: d.label,
+          logo: <RampLogo chainrailsChain={d.chainrailsChain} label={d.label} size={28} />,
+        }))
+      : []),
+  ];
+  const chainValue = crDest ? `cr:${crDest.chainrailsChain}` : sourceChain;
+  const chainName = crDest?.label ?? getChain(sourceChain)?.name ?? sourceChain;
+
+  const tokenChainPicker = (
+    <div className="relative">
+      <TokenChainPill
+        token={token}
+        chainName={chainName}
+        tokenLogo={<TokenLogo symbol={token} size={28} />}
+        chainLogo={
+          crDest ? (
+            <RampLogo chainrailsChain={crDest.chainrailsChain} label={crDest.label} size={10} />
+          ) : (
+            <ChainLogo id={sourceChain} label={chainName} size={10} />
+          )
+        }
+        onClick={() => setChainOpen((v) => !v)}
+      />
+      <TokenChainPicker
+        open={chainOpen}
+        onClose={() => setChainOpen(false)}
+        title="Send from"
+        hint="Select the chain where you have the USDC/USDT you're going to use."
+        token={token}
+        tokens={TOKENS}
+        onTokenChange={(t) => setToken(t as (typeof TOKENS)[number])}
+        tokenLogo={(t) => <TokenLogo symbol={t} size={18} />}
+        chains={chainOptions}
+        value={chainValue}
+        onSelect={handleSourceSelect}
+      />
+    </div>
   );
 
   if (!ready) return null;
@@ -523,12 +551,8 @@ export function CashoutFlow({
   // The chain picker lives inside the panel so it stays one unified card.
   if (panelDest) {
     return (
-      <div className="col gap-6">
-        {orderActive ? (
-          <header className="col gap-1">{backButton}</header>
-        ) : (
-          header
-        )}
+      <FlowPage mode="sell" onBack={onHeaderBack}>
+        {!orderActive && pageHeader}
         <ChainrailsSellPanel
           source={panelDest}
           amount={amount}
@@ -536,7 +560,6 @@ export function CashoutFlow({
           countryCode={payCountry ?? undefined}
           onCountryChange={payCountry === null ? undefined : choosePanelCountry}
           token={token}
-          onTokenChange={setToken}
           backRef={panelBack}
           resumeOrderId={resume?.id}
           resumeFiatLabel={resume?.fiatLabel}
@@ -549,24 +572,16 @@ export function CashoutFlow({
             setOrderActive(false);
             if (crOrderId) patchUrl({ crOrder: null });
           }}
-          networkSelect={
-            <SourceSelect
-              sourceChain={sourceChain}
-              crDest={crDest}
-              onSelect={handleSourceSelect}
-              style={{ ...INPUT, cursor: "pointer" }}
-            />
-          }
+          chainPicker={tokenChainPicker}
         />
-      </div>
+      </FlowPage>
     );
   }
 
   if (quote) {
     return (
-      <ReviewScreen
+      <SellReview
         quote={quote}
-        text={label}
         initialPayout={payoutDraft}
         onPayoutChange={(p) => {
           setPayoutDraft(p);
@@ -577,246 +592,135 @@ export function CashoutFlow({
           clearFlowDraft();
           clearComposeDraft("cashout");
           patchUrl({ step: null });
-          const exec = {
-            ...quote.exec,
-            ...(payout ? { payout } : {}),
-            ...(refundAddress ? { refundAddress } : {}),
-          };
+          const exec = { ...quote.exec, payout, refundAddress };
           onSubmit({ text: label, quote: { ...quote, exec } });
         }}
       />
     );
   }
 
+  // ----- Amount screen (design: Main, Mobile-Send, Mobile-Empty) ---------
+  const amountConverted = amountNum > 0 ? amountBeforeFee(amountNum) : 0;
+  const feeAmount = amountNum > 0 ? amountNum - amountConverted : 0;
+
   return (
-    <div className="col gap-6">
-      {header}
+    <FlowPage mode="sell" onBack={onHeaderBack}>
+      {pageHeader}
 
-      <div className="card col gap-5" style={{ padding: 20 }}>
-        <Field label="You sell">
-          <div className="col gap-2">
-            <div className="row center gap-2">
-              <PrefixedAmountInput
-                amount={amount}
-                onAmountChange={setAmount}
-                prefix="$"
-              />
-              <div className="row center gap-1" style={{ flex: "0 0 auto" }}>
-                {TOKENS.map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => setToken(t)}
-                    style={{
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 13,
-                      fontWeight: 500,
-                      lineHeight: 1.2,
-                      borderRadius: 999,
-                      border: "1px solid",
-                      background:
-                        token === t ? "var(--btn-bg)" : "var(--bg-elev)",
-                      color: token === t ? "var(--btn-fg)" : "var(--fg-soft)",
-                      borderColor:
-                        token === t ? "var(--btn-bg)" : "var(--line-2)",
-                    }}
-                  >
-                    <TokenLogo symbol={t} size={16} />
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Balance first — what they have, with Max right beside it. */}
-            {balanceFloored !== undefined && (
-              <div
-                className="row between center gap-2"
-                style={{ fontSize: 12.5, padding: "0 2px" }}
-              >
-                <span className="muted">
-                  Balance on {getChain(sourceChain)?.name ?? sourceChain} ·{" "}
-                  <span className="tabular">
-                    {formatToken(balanceFloored, token, 2)}
-                  </span>
-                </span>
-                {balanceFloored > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setAmount(String(balanceFloored))}
-                  style={{
-                    padding: "3px 12px",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    background: "var(--bg-elev)",
-                    border: "1px solid var(--line-2)",
-                    borderRadius: 999,
-                    color: "var(--accent)",
-                    cursor: "pointer",
-                  }}
-                >
-                  Max
-                </button>
-                )}
-              </div>
-            )}
-
-            {/* One line: estimate + the rate that produced it, in parens. */}
-            {unitRate && (
-              <div
-                className="row center gap-2"
-                style={{ fontSize: 12.5, padding: "0 2px" }}
-              >
-                {estimate !== null && (
-                  <span style={{ color: "var(--accent)", fontWeight: 500 }}>
-                    ≈ {formatFiat(currency, estimate)}
-                  </span>
-                )}
-                <span className="muted tabular">
-                  {estimate !== null
-                    ? `(1 ${token} = ${formatNumber(unitRate)} ${currency})`
-                    : `1 ${token} = ${formatNumber(unitRate)} ${currency}`}
-                </span>
-              </div>
-            )}
-
-            {/* The figure above is an estimate at the live rate; Paycrest locks
-                the real rate when the order is created. */}
-            {unitRate && estimate !== null && (
-              <span
-                className="muted"
-                style={{ fontSize: 11, padding: "0 2px", opacity: 0.85 }}
-              >
-                Estimate · final rate locks when you create the order
-              </span>
-            )}
-
-            {overBalance && (
-              <span
-                style={{
-                  fontSize: 12,
-                  color: "var(--pend)",
-                  padding: "0 2px",
-                  lineHeight: 1.4,
-                }}
-              >
-                More than this wallet holds. You can still continue and pay
-                from another wallet.
-              </span>
-            )}
-          </div>
-        </Field>
-
-        <Field
-          label="From"
-          hint="Select the chain where you have the USDC/USDT you're going to use."
-        >
-          <SourceSelect
-            sourceChain={sourceChain}
-            crDest={crDest}
-            onSelect={handleSourceSelect}
-            style={INPUT}
-          />
-        </Field>
-
-        <Field label="Recipient gets paid in">
-          <select
-            value={currency}
-            onChange={(e) => choosePayCurrency(e.target.value)}
-            style={{ ...INPUT, cursor: "pointer" }}
-          >
-            {PAYCREST_FIAT.map((c) => (
-              <option key={c} value={c}>
-                {fiatOptionLabel(c)}
-              </option>
-            ))}
-            {moreCountries.length > 0 && (
-              <optgroup label="More countries">
-                {moreCountries.map((c) => (
-                  <option key={c.countryCode} value={`cr:${c.countryCode}`}>
-                    {countryFlag(c.countryCode)} {c.currency.code} — {c.name}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-        </Field>
-
-        {error && (
-          <div
-            style={{
-              padding: "12px 14px",
-              background: "var(--err-soft)",
-              border: "1px solid var(--err)",
-              borderRadius: 10,
-              fontSize: 13,
-              color: "var(--fg-soft)",
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        <button
-          className="btn btn-fat"
-          disabled={!canContinue || loading}
-          onClick={toReview}
-          style={{
-            background: canContinue ? "var(--btn-bg)" : "var(--bg-sunk)",
-            color: canContinue ? "var(--btn-fg)" : "var(--fg-faint)",
-            cursor: canContinue && !loading ? "pointer" : "default",
-          }}
-        >
-          {loading ? (
-            <>
-              <Icon.Spinner size={14} /> Getting quote…
-            </>
-          ) : (
-            <>
-              {canContinue ? "Continue" : "Enter an amount"}
-              {canContinue && <Icon.ArrowRight />}
-            </>
-          )}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-const INPUT: React.CSSProperties = {
-  width: "100%",
-  padding: "11px 12px",
-  background: "var(--bg-soft)",
-  border: "1px solid var(--line)",
-  borderRadius: 10,
-  color: "var(--fg)",
-  fontSize: 14,
-  outline: "none",
-};
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  /** Optional help text behind an (i) icon next to the label. */
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="col gap-2">
-      <span
-        className="row center gap-1"
-        style={{ fontSize: 13, color: "var(--fg-mute)" }}
+      <AmountField
+        id="sell-amount"
+        label="You send"
+        value={amount}
+        onChange={setAmount}
+        aside={
+          balanceFloored !== undefined && (
+            <BalanceAside
+              balanceLabel={formatToken(balanceFloored, token, 2)}
+              showMax={balanceFloored > 0}
+              onMax={() => setAmount(String(balanceFloored))}
+            />
+          )
+        }
+        pill={tokenChainPicker}
       >
-        {label}
-        {hint && <InfoHint text={hint} />}
-      </span>
-      {children}
-    </label>
+        {overBalance && (
+          <p className="text-[13px] leading-snug text-warn-ink">
+            More than this wallet holds. You can still continue and pay from
+            another wallet.
+          </p>
+        )}
+      </AmountField>
+
+      <RateLine
+        rate={
+          unitRate
+            ? { from: `1 ${token}`, to: `${formatNumber(unitRate)} ${currency}` }
+            : null
+        }
+      />
+
+      <AmountField
+        id="sell-receive"
+        label="They receive"
+        readOnly
+        prefix="≈"
+        value={estimate !== null ? formatNumber(estimate) : ""}
+        pill={
+          <div className="relative">
+            <CurrencyPill
+              countryCode={selectedCountry.countryCode}
+              currencyCode={selectedCountry.currencyCode}
+              countryName={selectedCountry.countryName}
+              currencyName={selectedCountry.currencyName}
+              onClick={() => setCurrencyOpen((v) => !v)}
+            />
+            <CurrencyPicker
+              open={currencyOpen}
+              onClose={() => setCurrencyOpen(false)}
+              title="Recipient gets paid in"
+              value={selectedCountry.value}
+              popular={popularCountries}
+              all={otherCountries}
+              storageKey="sell"
+              onSelect={(o) => choosePayCurrency(o.value)}
+            />
+          </div>
+        }
+      />
+
+      {amountNum > 0 && (
+        <>
+          <SummaryRows
+            className="mt-4"
+            rows={[
+              {
+                label: `Fee (${PAYCREST_SENDER_FEE_PERCENT}%)`,
+                value: formatToken(feeAmount, token, 2),
+              },
+              {
+                label: "Amount converted",
+                value: formatToken(amountConverted, token, 2),
+              },
+              {
+                label: "Total from your wallet",
+                value: formatToken(amountNum, token, 2),
+                total: true,
+              },
+            ]}
+          />
+          {unitRate && (
+            <p className="mt-2 px-1 text-xs text-muted">
+              Estimate · final rate locks when you create the order
+            </p>
+          )}
+        </>
+      )}
+
+      {error && (
+        <div className="mt-4">
+          <Notice tone="error">{error}</Notice>
+        </div>
+      )}
+
+      <PrimaryButton
+        disabled={!canContinue}
+        loading={loading}
+        onClick={toReview}
+      >
+        {loading ? (
+          "Getting quote…"
+        ) : canContinue ? (
+          <>
+            Continue to recipient <ArrowRight />
+          </>
+        ) : (
+          "Enter an amount"
+        )}
+      </PrimaryButton>
+      <Reassurance>
+        You&apos;ll review everything before anything leaves your wallet.
+      </Reassurance>
+    </FlowPage>
   );
 }
+

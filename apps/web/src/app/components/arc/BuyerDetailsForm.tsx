@@ -8,7 +8,6 @@
  */
 
 import React, { useState } from "react";
-import { Icon } from "./icons";
 import {
   BUYER_ID_TYPES,
   XOF_COUNTRIES,
@@ -20,31 +19,27 @@ import {
   type BuyerDetails,
   type BuyerIdType,
 } from "@railglide/shared/kyc";
+import { ChevronDown } from "./ui/sendKit";
 
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "11px 12px",
-  background: "var(--bg-soft)",
-  border: "1px solid var(--line)",
-  borderRadius: 10,
-  color: "var(--fg)",
-  fontSize: 14,
-  outline: "none",
-};
+const INPUT =
+  "h-12 w-full rounded-[14px] border border-edge bg-card px-3.5 text-[15px] text-ink outline-none placeholder:text-muted focus:border-ink focus:shadow-[0_0_0_3px_rgba(23,23,26,0.08)]";
 
-function FieldLabel({ children }: { children: React.ReactNode }) {
+function Field({
+  id,
+  label,
+  children,
+}: {
+  id: string;
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
-    <span
-      className="font-mono"
-      style={{
-        fontSize: 10,
-        letterSpacing: 0.06,
-        color: "var(--fg-mute)",
-        textTransform: "uppercase",
-      }}
-    >
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-[13px] font-medium text-muted">
+        {label}
+      </label>
       {children}
-    </span>
+    </div>
   );
 }
 
@@ -52,11 +47,7 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 function elevenDigitHint(value: string | undefined, name: string) {
   const digits = (value ?? "").replace(/[\s-]/g, "");
   if (!digits || /^\d{11}$/.test(digits)) return null;
-  return (
-    <span style={{ fontSize: 12, color: "var(--err)" }}>
-      {name} must be 11 digits.
-    </span>
-  );
+  return <span className="text-[13px] text-danger">{name} must be 11 digits.</span>;
 }
 
 export function BuyerDetailsForm({
@@ -90,90 +81,70 @@ export function BuyerDetailsForm({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="row between center"
-        style={{
-          ...inputStyle,
-          cursor: "pointer",
-          textAlign: "left",
-          gap: 12,
-        }}
+        className="flex w-full items-center justify-between gap-3 rounded-[14px] border border-edge bg-card px-3.5 py-3 text-left"
       >
-        <span className="col" style={{ gap: 2 }}>
-          <span style={{ fontSize: 14 }}>
+        <span className="flex flex-col gap-0.5">
+          <span className="text-[15px] font-medium">
             {buyerDetailsSummary(currency, value)}
           </span>
-          <span className="muted" style={{ fontSize: 12 }}>
+          <span className="text-[13px] text-muted">
             Saved on this device · View or change
           </span>
         </span>
-        <Icon.ChevDown />
+        <ChevronDown />
       </button>
     );
   }
 
   return (
-    <div className="col gap-3">
+    <div className="flex flex-col gap-4">
       {saved && complete && (
         <button
           type="button"
           onClick={() => setOpen(false)}
-          className="row center gap-1"
-          style={{
-            alignSelf: "flex-start",
-            background: "none",
-            border: "none",
-            padding: 0,
-            color: "var(--accent)",
-            cursor: "pointer",
-            fontSize: 12.5,
-          }}
+          className="self-start text-[13px] font-semibold underline underline-offset-2"
         >
           Hide details
-          <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
-            <Icon.ChevDown />
-          </span>
         </button>
       )}
-      <span className="muted" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+      <p className="text-[13px] leading-[1.45] text-muted">
         {buyerDetailsNote(currency)}
-      </span>
+      </p>
 
-      <label className="col gap-1">
-        <FieldLabel>Date of birth</FieldLabel>
+      <Field id="buyer-dob" label="Date of birth">
         <input
+          id="buyer-dob"
           type="date"
           value={value.birthDate}
           onChange={(e) => set({ birthDate: e.target.value })}
-          style={inputStyle}
+          className={INPUT}
         />
-      </label>
+      </Field>
 
       {isNigeria ? (
-        <>
-          <label className="col gap-1">
-            <FieldLabel>NIN</FieldLabel>
-            <input
-              value={value.nin ?? ""}
-              onChange={(e) => set({ nin: e.target.value })}
-              placeholder="11-digit National Identification Number"
-              inputMode="numeric"
-              maxLength={13}
-              autoComplete="off"
-              style={inputStyle}
-            />
-            {elevenDigitHint(value.nin, "NIN")}
-          </label>
-        </>
+        <Field id="buyer-nin" label="NIN">
+          <input
+            id="buyer-nin"
+            value={value.nin ?? ""}
+            onChange={(e) => set({ nin: e.target.value })}
+            placeholder="11-digit National Identification Number"
+            inputMode="numeric"
+            maxLength={13}
+            autoComplete="off"
+            className={INPUT}
+          />
+          {elevenDigitHint(value.nin, "NIN")}
+        </Field>
       ) : (
         <>
-          <label className="col gap-1">
-            <FieldLabel>ID type</FieldLabel>
+          <Field id="buyer-id-type" label="ID type">
             <select
+              id="buyer-id-type"
               value={value.idType ?? ""}
               onChange={(e) =>
                 set({ idType: (e.target.value || undefined) as BuyerIdType })
               }
-              style={{ ...inputStyle, cursor: "pointer" }}
+              className={`${INPUT} cursor-pointer`}
             >
               <option value="">Select an ID</option>
               {BUYER_ID_TYPES.map((t) => (
@@ -182,24 +153,24 @@ export function BuyerDetailsForm({
                 </option>
               ))}
             </select>
-          </label>
-          <label className="col gap-1">
-            <FieldLabel>ID number</FieldLabel>
+          </Field>
+          <Field id="buyer-id-number" label="ID number">
             <input
+              id="buyer-id-number"
               value={value.idNumber ?? ""}
               onChange={(e) => set({ idNumber: e.target.value })}
               placeholder="As shown on your ID"
               autoComplete="off"
-              style={inputStyle}
+              className={INPUT}
             />
-          </label>
+          </Field>
           {isXof && (
-            <label className="col gap-1">
-              <FieldLabel>Country that issued your ID</FieldLabel>
+            <Field id="buyer-id-country" label="Country that issued your ID">
               <select
+                id="buyer-id-country"
                 value={value.idCountry ?? ""}
                 onChange={(e) => set({ idCountry: e.target.value })}
-                style={{ ...inputStyle, cursor: "pointer" }}
+                className={`${INPUT} cursor-pointer`}
               >
                 <option value="">Select a country</option>
                 {XOF_COUNTRIES.map((c) => (
@@ -208,39 +179,34 @@ export function BuyerDetailsForm({
                   </option>
                 ))}
               </select>
-            </label>
+            </Field>
           )}
         </>
       )}
 
       {isKenya && (
-        <label className="col gap-1">
-          <FieldLabel>M-Pesa phone number</FieldLabel>
+        <Field id="buyer-phone" label="M-Pesa phone number">
           <input
+            id="buyer-phone"
             value={value.phone ?? ""}
             onChange={(e) => set({ phone: e.target.value })}
             placeholder="0712 345 678"
             inputMode="tel"
-            style={inputStyle}
+            className={INPUT}
           />
-        </label>
+        </Field>
       )}
 
-      <label
-        className="row center gap-2"
-        style={{ fontSize: 13, cursor: "pointer", userSelect: "none" }}
-      >
+      <label className="flex min-h-11 cursor-pointer select-none items-center gap-2.5 text-sm">
         <input
           type="checkbox"
           checked={remember}
           onChange={(e) => onRememberChange(e.target.checked)}
-          style={{ accentColor: "var(--accent)", width: 16, height: 16 }}
+          className="size-[18px] accent-ink"
         />
-        <span className="col">
+        <span className="flex flex-col">
           <span>Save my details for next time</span>
-          <span className="muted" style={{ fontSize: 12 }}>
-            Kept only on this device
-          </span>
+          <span className="text-[13px] text-muted">Kept only on this device</span>
         </span>
       </label>
     </div>

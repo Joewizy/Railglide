@@ -1,27 +1,20 @@
 "use client";
 
-// SendScreen.tsx — describe flow (AssistantChat) + shared review/status UI.
-// Guided flows (CashoutFlow, BuyFlow) use ReviewScreen and StatusScreen directly.
+// SendScreen.tsx — describe flow (AssistantChat) + the shared status screen.
+// Guided flows (CashoutFlow, BuyFlow) have their own review pages
+// (SellReview, BuyReview) and hand off to StatusScreen.
 
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAccount } from "wagmi";
-import { useConnectModal } from "@rainbow-me/rainbowkit";
+import { cachedFetch, ONE_HOUR } from "@/lib/cachedFetch";
 import { parseUnits } from "viem";
 import { Icon } from "./icons";
 import { AssistantChat } from "./AssistantChat";
 import { PaycrestOrderScreen } from "./PaycrestOrderScreen";
-import { BuyerDetailsForm } from "./BuyerDetailsForm";
-import {
-  checkBuyerDetails,
-  trimBuyerDetails,
-  type BuyerDetails,
-} from "@railglide/shared/kyc";
-import {
-  clearBuyerDetails,
-  loadBuyerDetails,
-  saveBuyerDetails,
-} from "@/lib/buyerDetails";
+import { savePendingLaunch } from "./swapUrl";
+import { checkBuyerDetails, type BuyerDetails } from "@railglide/shared/kyc";
+import { loadBuyerDetails } from "@/lib/buyerDetails";
 import type { FlowLaunch } from "@/assistant/types";
 import {
   useCctp,
@@ -47,10 +40,9 @@ import {
   paycrestAmountDue,
 } from "@/rails/paycrest";
 import { ChainrailsStatus } from "./flows/ChainrailsStatus";
-import { isValidRampAddress, type RampAddressKind } from "@/rails/chainrails";
+import { type RampAddressKind } from "@/rails/chainrails";
 import {
   currencyLabel,
-  fiatSymbol,
   formatCountdown,
   formatDeadline,
   formatFiat,
@@ -58,7 +50,6 @@ import {
   formatNumber,
   formatStable,
   formatToken,
-  isStableToken,
   titleCase,
 } from "@/utils";
 
@@ -219,7 +210,7 @@ function looksLikePhone(s: string): boolean {
   return /^\+?\d[\d\s-]{6,}$/.test(s.trim());
 }
 
-function isRecipientAddressValid(
+export function isRecipientAddressValid(
   value: string,
   chainId: ChainId | null
 ): boolean {
@@ -400,480 +391,6 @@ export function SendScreen({
   );
 }
 
-function FeeRow({
-  label,
-  value,
-  hint,
-}: {
-  label: React.ReactNode;
-  value: React.ReactNode;
-  hint?: string | null;
-}) {
-  return (
-    <div className="row between center">
-      <span style={{ color: "var(--fg-soft)" }}>{label}</span>
-      <span className="row center gap-3">
-        {hint && (
-          <span className="muted font-mono" style={{ fontSize: 11 }}>
-            {hint}
-          </span>
-        )}
-        <span className="font-mono tabular" style={{ color: "var(--fg)" }}>
-          {value}
-        </span>
-      </span>
-    </div>
-  );
-}
-
-/* ───────── REVIEW (pre-sign confirmation) ───────── */
-export function ReviewScreen({
-  quote,
-  text,
-  onBack,
-  onConfirm,
-  initialPayout,
-  onPayoutChange,
-}: {
-  quote: Quote;
-  text: string;
-  onBack: () => void;
-  onConfirm: (
-    payout: PayoutDetails | null,
-    destinationAddress?: string,
-    buyer?: BuyerDetails
-  ) => void;
-  /** Restored after refresh when the guided flow draft includes payout fields. */
-  initialPayout?: PayoutDetails;
-  onPayoutChange?: (payout: PayoutDetails) => void;
-}) {
-  const { isConnected, address } = useAccount();
-  const { openConnectModal } = useConnectModal();
-
-  // Paycrest fiat legs need structured bank / mobile-money details.
-  const isOfframp = quote.exec.action === "offramp";
-  const isOnramp = quote.exec.action === "onramp";
-  const isPaycrestOnramp = isOnramp && quote.exec.rail === "paycrest";
-  const needsAccountDetails = isOfframp || isPaycrestOnramp;
-  // Both fiat legs collect a wallet address: on-ramp's USDC destination,
-  // off-ramp's refund address. Prefilled from the wallet, no connection needed.
-  const needsWalletField = isOnramp || isOfframp;
-  const [payout, setPayout] = useState<PayoutDetails>(
-    initialPayout ?? {
-      institution: "",
-      institutionName: "",
-      // Off-ramp: recipient is the payee's bank account, so prefill it.
-      // On-ramp: recipient is the crypto destination, NOT a bank account —
-      // the refund account is separate, so start it empty.
-      accountIdentifier: isOnramp ? "" : (quote.exec.recipient ?? ""),
-      accountName: "",
-    }
-  );
-  const setPayoutAndPersist = (next: PayoutDetails) => {
-    setPayout(next);
-    onPayoutChange?.(next);
-  };
-
-  // The wallet address for the fiat leg — on-ramp's USDC destination or
-  // off-ramp's refund address. Prefilled from the connected wallet when
-  // available, editable, and needs no connection.
-  const [destination, setDestination] = useState(address ?? "");
-  useEffect(() => {
-    if (address) setDestination((cur) => cur || address);
-  }, [address]);
-  // Chainrails delivers to chains the app's registry may not know (Tron, Monad…),
-  // so it carries its own address format; fall back to chain-id validation.
-  const rampAddressKind = quote.exec.chainrailsRamp?.addressKind;
-  const destinationValid = rampAddressKind
-    ? isValidRampAddress(rampAddressKind, destination)
-    : isRecipientAddressValid(destination, quote.exec.toChain);
-
-  // Paycrest Buy orders also need the buyer's details. Load the copy saved on
-  // this device after mount (localStorage isn't there during server render).
-  const buyCurrency = quote.exec.fiatCurrency ?? "";
-  const [buyer, setBuyer] = useState<BuyerDetails>({ birthDate: "" });
-  // On by default; turning it off forgets any copy saved in this browser.
-  const [rememberBuyer, setRememberBuyer] = useState(true);
-  const [buyerSaved, setBuyerSaved] = useState(false);
-  useEffect(() => {
-    if (!isPaycrestOnramp) return;
-    const saved = loadBuyerDetails();
-    if (saved) {
-      setBuyer(saved);
-      setBuyerSaved(true);
-    }
-  }, [isPaycrestOnramp]);
-  const buyerProblems = isPaycrestOnramp
-    ? checkBuyerDetails(buyCurrency, buyer)
-    : [];
-  const buyerReady = buyerProblems.length === 0;
-
-  const payoutReady =
-    !needsAccountDetails ||
-    (!!payout.institution &&
-      !!payout.accountIdentifier.trim() &&
-      !!payout.accountName.trim());
-
-  // On-ramp needs no wallet — the user pays fiat and USDC lands at a
-  // destination address (entered on the Buy form). Every other rail signs an
-  // on-chain transaction, so it does need a connected wallet.
-  const needsWallet = !needsWalletField;
-  const walletReady = isConnected || !needsWallet;
-  const canConfirm =
-    walletReady &&
-    payoutReady &&
-    buyerReady &&
-    (!needsWalletField || destinationValid);
-
-  const confirm = () => {
-    let buyerToSend: BuyerDetails | undefined;
-    if (isPaycrestOnramp) {
-      buyerToSend = trimBuyerDetails(buyCurrency, buyer);
-      if (rememberBuyer) saveBuyerDetails(buyerToSend);
-    }
-    onConfirm(
-      needsAccountDetails ? payout : null,
-      needsWalletField ? destination.trim() : undefined,
-      buyerToSend
-    );
-  };
-
-  // Once the account name resolves, show the confirmed recipient in the
-  // headline instead of the raw account number / placeholder.
-  const recipientLine =
-    needsAccountDetails && payout.accountName
-      ? `${payout.accountName}${payout.institutionName ? ` · ${payout.institutionName}` : ""}`
-      : quote.to.sub
-        ? `${quote.to.label} · ${quote.to.sub}`
-        : quote.to.label;
-  return (
-    <div className="col gap-6">
-      <header className="row between center wrap" style={{ gap: 16 }}>
-        <div>
-          <button
-            className="btn btn-quiet btn-sm"
-            onClick={onBack}
-            style={{ padding: "0 8px", marginBottom: 6 }}
-          >
-            <Icon.Arrow rotate={180} size={12} /> Back to edit
-          </button>
-          <h1
-            style={{
-              fontSize: 30,
-              lineHeight: 1.1,
-              letterSpacing: "-0.02em",
-              fontWeight: 500,
-            }}
-          >
-            Review &amp; confirm
-          </h1>
-          <span className="muted" style={{ fontSize: 14 }}>
-            {text}
-          </span>
-        </div>
-        <span className="chip chip-accent">
-          <span className="font-mono" style={{ fontSize: 10 }}>
-            ● Best route
-          </span>
-        </span>
-      </header>
-
-      <div className="card-lg" style={{ padding: 24 }}>
-        {/* headline numbers */}
-        <div className="row between center wrap" style={{ gap: 18 }}>
-          <div className="col">
-            <span className="muted" style={{ fontSize: 12 }}>
-              You send
-            </span>
-            <span
-              className="font-mono tabular"
-              style={{
-                fontSize: 34,
-                fontWeight: 500,
-                letterSpacing: "-0.015em",
-              }}
-            >
-              {fiatSymbol(quote.from.token) ||
-                (isStableToken(quote.from.token) ? "$" : "")}
-              {formatNumber(quote.from.amount)}{" "}
-              <span style={{ color: "var(--fg-mute)" }}>
-                {quote.from.token}
-              </span>
-            </span>
-            <span
-              className="muted font-mono"
-              style={{ fontSize: 12, marginTop: 4 }}
-            >
-              {quote.from.chain}
-            </span>
-          </div>
-          <Icon.ArrowRight size={22} />
-          <div className="col" style={{ alignItems: "flex-end" }}>
-            <span className="muted" style={{ fontSize: 12 }}>
-              Recipient gets
-            </span>
-            <span
-              className="font-mono tabular"
-              style={{
-                fontSize: 34,
-                fontWeight: 500,
-                color: "var(--accent)",
-                letterSpacing: "-0.015em",
-              }}
-            >
-              {quote.to.amount}
-            </span>
-            <span
-              className="muted font-mono"
-              style={{ fontSize: 12, marginTop: 4 }}
-            >
-              {recipientLine}
-            </span>
-          </div>
-        </div>
-
-        {/* Fiat legs (any on/off-ramp — Paycrest or Chainrails) skip the crypto
-            rail stages and the placeholder fee table; the real numbers come from
-            the order/checkout. Only crypto routes keep the breakdown. */}
-        {!isOfframp && !isOnramp && (
-          <>
-            <div className="hr" style={{ margin: "22px 0" }} />
-
-            {/* rail */}
-            <div className="row between center" style={{ marginBottom: 18 }}>
-              {quote.rail.map((r, i) => (
-                <React.Fragment key={r}>
-                  <div
-                    className="col center"
-                    style={{ alignItems: "center", gap: 6, flex: 1 }}
-                  >
-                    <span
-                      style={{
-                        width: 30,
-                        height: 30,
-                        borderRadius: 9,
-                        background: "var(--accent-soft)",
-                        color: "var(--accent)",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontFamily: "Geist Mono, monospace",
-                        fontSize: 11,
-                        fontWeight: 600,
-                      }}
-                    >
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <span style={{ fontSize: 12.5, fontWeight: 500 }}>{r}</span>
-                  </div>
-                  {i < quote.rail.length - 1 && (
-                    <div
-                      style={{
-                        flex: 0.6,
-                        height: 1,
-                        background: "var(--line-2)",
-                      }}
-                    />
-                  )}
-                </React.Fragment>
-              ))}
-            </div>
-
-            <div className="hr" />
-
-            {/* breakdown */}
-            <div className="col gap-2" style={{ fontSize: 13, marginTop: 14 }}>
-              <FeeRow label="Network fee" value={quote.fee.network} />
-              <FeeRow label="Rail fee" value={quote.fee.rail} />
-              <FeeRow
-                label="FX spread"
-                value={quote.fee.spread}
-                hint={quote.rate}
-              />
-              <div className="hr" style={{ margin: "4px 0" }} />
-              <FeeRow
-                label={<strong style={{ fontWeight: 500 }}>Total fee</strong>}
-                value={
-                  <strong
-                    className="font-mono tabular"
-                    style={{ fontWeight: 500 }}
-                  >
-                    {quote.fee.total}
-                  </strong>
-                }
-              />
-              <FeeRow
-                label="ETA"
-                value={<span className="font-mono">{quote.eta}</span>}
-              />
-              <FeeRow
-                label="From"
-                value={<span className="font-mono">{quote.from.chain}</span>}
-              />
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* On-ramp: destination, plus a refund account for Paycrest only. */}
-      {isOnramp && (
-        <div className="card col gap-5" style={{ padding: 20 }}>
-          <WalletAddressField
-            label={`Receive ${quote.exec.toToken ?? "USDC"} to`}
-            info="The wallet address your crypto is delivered to. You don't need to connect — paste any address you control."
-            value={destination}
-            onChange={setDestination}
-            valid={destinationValid}
-            hasWallet={!!address}
-          />
-          {isPaycrestOnramp && (
-            <div>
-              <div className="row center gap-1" style={{ marginBottom: 12 }}>
-                <span className="eyebrow">Refund account</span>
-                <InfoHint
-                  text={`If this purchase can't be completed, your ${
-                    quote.exec.fiatCurrency
-                      ? currencyLabel(quote.exec.fiatCurrency)
-                      : "money"
-                  } is refunded to this account. Use a local account you control — ideally the one you're paying from.`}
-                />
-              </div>
-              <PayoutForm
-                currency={quote.exec.fiatCurrency}
-                value={payout}
-                onChange={setPayoutAndPersist}
-                mode="refund"
-                variant="embedded"
-              />
-            </div>
-          )}
-          {isPaycrestOnramp && (
-            <div>
-              <div className="row center gap-1" style={{ marginBottom: 12 }}>
-                <span className="eyebrow">Your details</span>
-                <InfoHint text="Needed for every purchase. Save them and they're filled in for you next time." />
-              </div>
-              <BuyerDetailsForm
-                currency={buyCurrency}
-                value={buyer}
-                onChange={setBuyer}
-                remember={rememberBuyer}
-                onRememberChange={(on) => {
-                  setRememberBuyer(on);
-                  if (!on) {
-                    clearBuyerDetails();
-                    setBuyerSaved(false);
-                  }
-                }}
-                saved={buyerSaved}
-              />
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Off-ramp: payout account + crypto refund address, in one card. */}
-      {isOfframp && (
-        <div className="card col gap-5" style={{ padding: 20 }}>
-          <div>
-            <div className="row center gap-1" style={{ marginBottom: 12 }}>
-              <span className="eyebrow">Payout account</span>
-              <InfoHint
-                text={`The bank or mobile-money account that receives the ${
-                  quote.exec.fiatCurrency
-                    ? currencyLabel(quote.exec.fiatCurrency)
-                    : "cash"
-                } payout.`}
-              />
-            </div>
-            <PayoutForm
-              currency={quote.exec.fiatCurrency}
-              value={payout}
-              onChange={setPayoutAndPersist}
-              mode="payout"
-              variant="embedded"
-            />
-          </div>
-          <WalletAddressField
-            label="Refund address"
-            info="If the payout can't be completed, your USDC is returned to this address. Prefilled from your connected wallet — no connection needed."
-            value={destination}
-            onChange={setDestination}
-            valid={destinationValid}
-            hasWallet={!!address}
-          />
-        </div>
-      )}
-
-      <button
-        className="btn btn-fat"
-        style={{
-          background: !walletReady
-            ? "var(--accent)"
-            : canConfirm
-              ? "var(--btn-bg)"
-              : "var(--bg-sunk)",
-          color: !walletReady
-            ? "#fff"
-            : canConfirm
-              ? "var(--btn-fg)"
-              : "var(--fg-faint)",
-          cursor: !walletReady || canConfirm ? "pointer" : "default",
-        }}
-        disabled={walletReady && !canConfirm}
-        onClick={
-          !walletReady
-            ? () => openConnectModal?.()
-            : canConfirm
-              ? confirm
-              : undefined
-        }
-      >
-        {!walletReady ? (
-          <>
-            Connect wallet to continue <Icon.ArrowRight />
-          </>
-        ) : needsWalletField && !destinationValid ? (
-          isOnramp ? (
-            "Enter wallet address to continue"
-          ) : (
-            "Enter refund address to continue"
-          )
-        ) : !payoutReady ? (
-          isPaycrestOnramp ? (
-            "Enter refund account to continue"
-          ) : (
-            "Enter payout details to continue"
-          )
-        ) : !buyerReady ? (
-          buyerProblems[0].replace(/\.$/, "")
-        ) : needsWalletField ? (
-          <>
-            Confirm and continue <Icon.ArrowRight />
-          </>
-        ) : (
-          <>
-            Confirm and sign <Icon.ArrowRight />
-          </>
-        )}
-      </button>
-      <span className="muted" style={{ fontSize: 12, textAlign: "center" }}>
-        {!walletReady
-          ? isPaycrestOnramp
-            ? "We need your wallet address as the USDC destination."
-            : "We need a connected wallet to sign the source-chain transaction."
-          : isPaycrestOnramp
-            ? "You'll pay to the account we show next; your USDC arrives in your wallet once it clears."
-            : isOnramp
-              ? "You'll continue to the provider's secure checkout to pay with local currency."
-              : isOfframp
-                ? "You'll send your USDC next — then the cash is paid out to the recipient."
-                : "You'll approve the transactions in your wallet. Funds move only after that."}
-      </span>
-    </div>
-  );
-}
-
 /* ───────── payout / refund account form (Paycrest fiat legs) ───────── */
 export function PayoutForm({
   currency,
@@ -905,7 +422,11 @@ export function PayoutForm({
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    fetch(`/api/paycrest/institutions?currency=${encodeURIComponent(currency)}`)
+    cachedFetch(
+      `/api/paycrest/institutions?currency=${encodeURIComponent(currency)}`,
+      {},
+      ONE_HOUR
+    )
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
@@ -1094,65 +615,6 @@ export function PayoutForm({
       </div>
 
       {fields}
-    </div>
-  );
-}
-
-/** Wallet-address field shared by the fiat legs (USDC destination / refund). */
-function WalletAddressField({
-  label,
-  info,
-  value,
-  onChange,
-  valid,
-  hasWallet,
-}: {
-  label: string;
-  info: string;
-  value: string;
-  onChange: (v: string) => void;
-  valid: boolean;
-  hasWallet: boolean;
-}) {
-  return (
-    <div>
-      <div className="row center gap-1" style={{ marginBottom: 12 }}>
-        <span className="eyebrow">{label}</span>
-        <InfoHint text={info} />
-      </div>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="0x… wallet address"
-        spellCheck={false}
-        style={{
-          width: "100%",
-          padding: "11px 12px",
-          background: "var(--bg-soft)",
-          border: "1px solid var(--line)",
-          borderRadius: 10,
-          color: "var(--fg)",
-          fontSize: 13,
-          fontFamily: "Geist Mono, ui-monospace, monospace",
-          outline: "none",
-        }}
-      />
-      {(() => {
-        const hint =
-          value.trim() && !valid
-            ? "That doesn’t look like a valid wallet address."
-            : hasWallet
-              ? "Defaults to your connected wallet — edit to change."
-              : "";
-        return hint ? (
-          <span
-            className="muted"
-            style={{ fontSize: 12, marginTop: 8, display: "block" }}
-          >
-            {hint}
-          </span>
-        ) : null;
-      })()}
     </div>
   );
 }
@@ -1387,13 +849,10 @@ function cctpStages(
 }
 
 /**
- * Maps a PaycrestOfframpStatus to the off-ramp stage list + active index,
- * filling per-row refs (order id, funding tx) from the live hook state.
+ * Maps the Buy (on-ramp) hook status to the 4 progress steps + active index.
  */
 function paycrestOnrampStages(
   status: PaycrestOnrampStatus,
-  orderId: string | null,
-  depositLabel: string | null,
   toChain: ChainId | null,
   token: string | null
 ): { stages: StageRow[]; activeIndex: number; done: boolean } {
@@ -1401,21 +860,19 @@ function paycrestOnrampStages(
   const stages: StageRow[] = [
     {
       l: "Rate locked",
-      d: "We've reserved an account for your deposit.",
-      ref: orderId ? `order ${orderId.slice(0, 8)}…` : undefined,
+      d: "We've opened an account for your payment.",
     },
     {
-      l: "Send your payment",
-      d: "Transfer the exact amount to the account shown below.",
-      ref: depositLabel ?? undefined,
+      l: "Waiting for your payment",
+      d: "This page updates on its own when it arrives.",
     },
     {
-      l: "Confirming your payment",
-      d: `Once it lands, your ${token ?? "USDC"} is on the way.`,
+      l: `Sending your ${token ?? "USDC"}`,
+      d: "Starts once your payment is confirmed.",
     },
     {
-      l: "Received",
-      d: `${token ?? "USDC"} delivered on ${dstName}.`,
+      l: `You receive ${token ?? "USDC"}`,
+      d: `In your wallet on ${dstName}.`,
     },
   ];
 
@@ -1539,21 +996,24 @@ function paycrestStages(
       ? `Confirming your ${token}`
       : `Waiting for your ${token}`;
   const step2Desc = received
-    ? "Your funds will be credited to your bank account shortly."
+    ? "Confirmed. The payout is on its way."
     : confirming
-      ? "Sent on-chain — finalizing with the provider."
-      : "Send the exact amount to continue.";
-  const paidLine = `${fiatLabel ?? fiatCode} to ${recipient ?? "recipient"}${
-    bank ? ` · ${bank}` : ""
-  }${acct ? ` · ${acct}` : ""}`;
+      ? "Sent — confirming on-chain."
+      : "This page updates on its own when it arrives.";
+  const firstName = recipient?.split(" ")[0];
+  const paidLine = `${firstName ?? "The recipient"} receives ${fiatLabel ?? fiatCode}`;
+  const paidDesc = [bank, acct].filter(Boolean).join(" · ") || "Delivered to the recipient.";
   const rateLockedDesc = validUntil
     ? `Send your ${token} before ${formatDeadline(validUntil)}.`
     : "Your rate is held for this transfer.";
   const stages: StageRow[] = [
     { l: "Rate locked", d: rateLockedDesc },
     { l: step2Label, d: step2Desc },
-    { l: `Sending to your account`, d: "Processing your payout." },
-    { l: paidLine, d: "Delivered to the recipient." },
+    {
+      l: "Converting and paying out",
+      d: received ? "Processing your payout." : `Starts once your ${token} is confirmed.`,
+    },
+    { l: paidLine, d: paidDesc },
   ];
 
   const indexFor: Record<OfframpPhase, number> = {
@@ -1948,7 +1408,7 @@ export function StatusScreen({
   const payoutAcct = exec?.payout?.accountIdentifier ?? null;
   // What the user sends = order amount + fees (Paycrest's amountToTransfer).
   const sendLabel = offrampOrder
-    ? formatStable(paycrestAmountDue(offrampOrder), exec?.fromToken ?? "")
+    ? formatToken(Number(paycrestAmountDue(offrampOrder)), exec?.fromToken ?? "", 2)
     : "";
   const fiatReceive =
     offrampOrder?.rate && offrampOrder.amount
@@ -2002,10 +1462,6 @@ export function StatusScreen({
       : exec?.rail === "paycrest" && exec.action === "onramp"
         ? paycrestOnrampStages(
             paycrestOnramp.status,
-            paycrestOnramp.order?.id ?? null,
-            paycrestOnramp.order?.depositAccountIdentifier
-              ? `${paycrestOnramp.order.amountToTransfer ?? ""} ${paycrestOnramp.order.depositCurrency ?? ""} → ${paycrestOnramp.order.depositAccountIdentifier}`
-              : null,
             exec.toChain,
             exec.toToken
           )
@@ -2057,9 +1513,9 @@ export function StatusScreen({
     return () => clearInterval(id);
   }, []);
 
-  const expiryMs = offrampOrder?.validUntil
-    ? new Date(offrampOrder.validUntil).getTime()
-    : null;
+  // One countdown from the order's deadline (Sell: send the USDC; Buy: pay).
+  const deadlineIso = (offrampOrder ?? onrampOrder)?.validUntil;
+  const expiryMs = deadlineIso ? new Date(deadlineIso).getTime() : null;
   const remainingMs = expiryMs !== null ? expiryMs - now : null;
   // Once the deposit is sent the on-chain order locks the rate, so the
   // countdown is moot — hide it rather than scaring the user with 00:00.
@@ -2178,7 +1634,6 @@ export function StatusScreen({
       <PaycrestOrderScreen
         direction={paycrestDirection}
         headline={headline}
-        intentText={intent?.text}
         bootError={bootError}
         railError={railError}
         done={done}
@@ -2203,7 +1658,6 @@ export function StatusScreen({
         fromToken={exec.toToken ?? exec.fromToken ?? "USDC"}
         fromChainLabel={paycrestChainLabel}
         fiatCode={exec.fiatCurrency ?? ""}
-        feeLine={feeLine}
         payoutName={payoutName}
         payoutBank={payoutBank}
         payoutAcct={payoutAcct}
@@ -2221,9 +1675,23 @@ export function StatusScreen({
         transferTxHash={paycrestOfframp.transferTxHash}
         walletAddress={address ?? null}
         exec={exec}
-        onCopyAddress={copyDepositAddress}
-        copied={copied}
-        validUntil={offrampOrder?.validUntil ?? null}
+        validUntil={(offrampOrder ?? onrampOrder)?.validUntil ?? null}
+        onBack={intent?.resumeOrderId ? onBack : undefined}
+        onChangeAmount={
+          exec.action === "onramp" && onStartNew
+            ? () => {
+                // Reopen Buy with the same amount, currency and token filled in.
+                savePendingLaunch({
+                  flow: "buy",
+                  amount: exec.fromAmount,
+                  currency: exec.fiatCurrency ?? undefined,
+                  token: exec.toToken ?? undefined,
+                  chain: exec.toChain ?? undefined,
+                });
+                onStartNew();
+              }
+            : undefined
+        }
       />
     );
   }
