@@ -16,7 +16,7 @@ import {
   humanizePaycrestError,
   isPaycrestFiat,
   paycrestNetworkSlug,
-  paycrestPayoutInFlight,
+  paycrestOnrampPaid,
   type PaycrestFiat,
   type PaycrestOrder,
   type PaycrestRefundAccount,
@@ -168,7 +168,7 @@ export function usePaycrestOnramp(): UsePaycrestOnrampReturn {
       if (outcome === "expired") {
         throw new Error("This order expired before your payment arrived.");
       }
-      setStatus(paycrestPayoutInFlight(fetched) ? "settling" : "awaiting_deposit");
+      setStatus(paycrestOnrampPaid(fetched) ? "settling" : "awaiting_deposit");
       return fetched;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Couldn't resume order.";
@@ -187,8 +187,8 @@ export function usePaycrestOnramp(): UsePaycrestOnrampReturn {
       direction: "onramp",
       onUpdate: (next) => {
         setOrder(next);
-        // First sign the provider is moving flips the timeline to settling.
-        if (paycrestPayoutInFlight(next)) {
+        // Once the buyer's payment lands, the timeline moves to settling.
+        if (paycrestOnrampPaid(next)) {
           setStatus((s) => (s === "awaiting_deposit" ? "settling" : s));
         }
       },

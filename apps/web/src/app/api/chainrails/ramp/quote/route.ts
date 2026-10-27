@@ -56,6 +56,8 @@ export async function POST(req: NextRequest) {
     const upstream = await fetch(`${API_URL}?${params.toString()}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       cache: "no-store",
+      // Don't leave the user on a spinner if ChainRails hangs.
+      signal: AbortSignal.timeout(15_000),
     });
     const data: unknown = await upstream.json().catch(() => null);
     if (!upstream.ok) {

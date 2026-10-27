@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { RampCountry } from "@/rails/chainrails";
+import { cachedFetch, ONE_HOUR } from "@/lib/cachedFetch";
 
 export type RampDirection = "on-ramp" | "off-ramp";
 
@@ -19,9 +20,12 @@ export function useRampCountries(direction: RampDirection) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Already loaded on this page — don't ask again on every screen.
+    if (cache[direction]) return;
     let cancelled = false;
     const query = direction === "off-ramp" ? "?type=off-ramp" : "";
-    fetch(`/api/chainrails/ramp/countries${query}`)
+    // cachedFetch also merges screens that mount at the same moment into one call.
+    cachedFetch(`/api/chainrails/ramp/countries${query}`, {}, ONE_HOUR)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error || "Couldn't load countries.");

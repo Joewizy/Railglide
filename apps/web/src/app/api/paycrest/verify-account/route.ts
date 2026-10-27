@@ -75,9 +75,17 @@ export async function POST(req: NextRequest) {
       ? ((raw as { data: string }).data as string)
       : "";
 
-  if (!accountName) {
+  // Some providers confirm the account but don't share the holder's name
+  // (Paycrest answers "OK" instead of a name). Flag it so the web Sell form
+  // can ask the user to type the name. Still a 422 so older callers (mobile)
+  // keep treating it as unverified.
+  if (!accountName || accountName.trim().toUpperCase() === "OK") {
+    console.error("[paycrest] account verified without a name", raw);
     return NextResponse.json(
-      { error: "No account found for those details." },
+      {
+        error: "No account found for those details.",
+        needsName: res.ok && !!accountName,
+      },
       { status: 422 }
     );
   }

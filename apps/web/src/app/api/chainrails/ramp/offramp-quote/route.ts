@@ -120,8 +120,25 @@ export async function POST(req: NextRequest) {
     const upstream = await fetch(`${API_URL}?${params.toString()}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       cache: "no-store",
+      // Don't leave the user on a spinner if ChainRails hangs.
+      signal: AbortSignal.timeout(15_000),
     });
     const data: unknown = await upstream.json().catch(() => null);
+    // ChainRails crashes (500) instead of saying "unsupported" when asked for
+    // USDT on a chain where it doesn't handle USDT (e.g. Base, Solana; checked
+    // 2026-10-27 — Optimism works). Turn that into a clear "use USDC" answer.
+    if (upstream.status >= 500 && params.get("amountSymbol") === "USDT") {
+      console.warn(
+        `[chainrails] off-ramp USDT not supported from ${params.get("sourceChain")} (upstream ${upstream.status})`
+      );
+      return NextResponse.json(
+        {
+          error:
+            "USDT can't be sold from this network right now. Switch to USDC or pick another chain.",
+        },
+        { status: 422 }
+      );
+    }
     if (!upstream.ok) {
       console.error(
         `[chainrails] off-ramp quote failed (${upstream.status})`,

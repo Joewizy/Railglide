@@ -529,6 +529,37 @@ export function paycrestPayoutInFlight(order: PaycrestOrder): boolean {
   );
 }
 
+/**
+ * Buy (on-ramp): the buyer's fiat has arrived. A new Buy order is already
+ * "pending" while it waits for the transfer, so status alone can't say this —
+ * a paid order logs "order_fulfilling" (then settling → settled), checked on a
+ * live order 2026-10-27.
+ */
+export function paycrestOnrampPaid(order: PaycrestOrder): boolean {
+  if (Number(order.amountPaid ?? 0) > 0) return true;
+  if (
+    order.status === "validated" ||
+    order.status === "settling" ||
+    order.status === "fulfilled" ||
+    order.status === "settled"
+  )
+    return true;
+  return hasPaycrestTransactionLog(order, ["order_fulfilling", "order_settling"]);
+}
+
+/**
+ * Buy: the order is open and still waiting for the bank transfer. A new Buy
+ * order is already "pending", so this checks the payment itself.
+ */
+export function paycrestAwaitingPayment(order: PaycrestOrder): boolean {
+  return (
+    order.direction === "onramp" &&
+    (order.status === "initiated" || order.status === "pending") &&
+    !paycrestOnrampPaid(order) &&
+    !paycrestFundingWindowClosed(order)
+  );
+}
+
 /** Funding window closed with no credited deposit. */
 export function paycrestFundingWindowClosed(order: PaycrestOrder): boolean {
   if (order.status === "expired" || order.status === "refunded") return true;
@@ -663,6 +694,8 @@ export interface PaycrestHistoryOrder {
   refundAccountName: string | null;
   txHash: string | null;
   createdAt: string | null;
+  /** Buy only: open and still waiting for the buyer's bank transfer. */
+  awaitingPayment: boolean;
 }
 
 /**
@@ -825,6 +858,7 @@ export function summarizePaycrestOrderForHistory(
     id: order.id,
     direction: order.direction,
     status: order.status,
+    awaitingPayment: paycrestAwaitingPayment(order),
     amount: order.amount,
     token,
     network,

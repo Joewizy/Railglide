@@ -46,6 +46,22 @@ const FIAT_FLAGS: Record<string, string> = {
   MWK: "🇲🇼",
 };
 
+/** Home country of each single-country currency, for flags and picker rows. */
+export const FIAT_HOME_COUNTRY: Record<
+  string,
+  { countryCode: string; countryName: string }
+> = {
+  NGN: { countryCode: "NG", countryName: "Nigeria" },
+  KES: { countryCode: "KE", countryName: "Kenya" },
+  UGX: { countryCode: "UG", countryName: "Uganda" },
+  TZS: { countryCode: "TZ", countryName: "Tanzania" },
+  GHS: { countryCode: "GH", countryName: "Ghana" },
+  ZMW: { countryCode: "ZM", countryName: "Zambia" },
+  ZAR: { countryCode: "ZA", countryName: "South Africa" },
+  INR: { countryCode: "IN", countryName: "India" },
+  MWK: { countryCode: "MW", countryName: "Malawi" },
+};
+
 /** Flag emoji for a two-letter country code, e.g. "IN" → "🇮🇳". */
 export function countryFlag(countryCode: string): string {
   return [...countryCode.toUpperCase()]
@@ -192,4 +208,11 @@ export function formatAmountInput(raw: string): string {
   const [intPart, ...rest] = raw.split(".");
   const intFmt = intPart ? Number(intPart).toLocaleString("en-US") : "";
   return raw.includes(".") ? `${intFmt || "0"}.${rest.join("")}` : intFmt;
+}
+
+/** A quote's rate string "1,379.15 NGN/USDC" → "1 USDC ≈ 1,379.15 NGN". */
+export function formatQuoteRate(rate: string | null): string | null {
+  if (!rate) return null;
+  const m = rate.match(/^([\d,.]+)\s+(\w+)\/(\w+)$/);
+  return m ? `1 ${m[3]} ≈ ${m[1]} ${m[2]}` : rate;
 }

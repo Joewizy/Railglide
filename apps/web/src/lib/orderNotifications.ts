@@ -1,9 +1,10 @@
 "use client";
 
-import type {
-  PaycrestDirection,
-  PaycrestHistoryOrder,
-  PaycrestOrder,
+import {
+  paycrestAwaitingPayment,
+  type PaycrestDirection,
+  type PaycrestHistoryOrder,
+  type PaycrestOrder,
 } from "@/rails/paycrest";
 
 /**
@@ -108,6 +109,7 @@ export function buildHistoryOrder(
     id: order.id,
     direction,
     status: order.status,
+    awaitingPayment: paycrestAwaitingPayment(order),
     amount: order.amount,
     token: tracked.token,
     network: tracked.network,

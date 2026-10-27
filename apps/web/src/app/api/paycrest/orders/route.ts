@@ -34,38 +34,47 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let res: Response;
-  try {
-    res = await fetch(
-      `${PAYCREST_BASE_URL}/v2/sender/orders?page=1&pageSize=100`,
-      { headers: { "API-Key": apiKey, Accept: "application/json" } }
-    );
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Request failed",
-      },
-      { status: 502 }
-    );
-  }
+  // Paycrest returns at most 100 orders per page, and the account holds every
+  // user's orders — so walk the pages (capped) instead of reading only page 1.
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 10;
+  const list: Record<string, unknown>[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let res: Response;
+    try {
+      res = await fetch(
+        `${PAYCREST_BASE_URL}/v2/sender/orders?page=${page}&pageSize=${PAGE_SIZE}`,
+        { headers: { "API-Key": apiKey, Accept: "application/json" } }
+      );
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error: error instanceof Error ? error.message : "Request failed",
+        },
+        { status: 502 }
+      );
+    }
 
-  const raw: unknown = await res.json().catch(() => null);
-  if (!res.ok) {
-    return NextResponse.json(
-      { error: `Couldn't load orders (${res.status}).` },
-      { status: 502 }
-    );
-  }
+    const raw: unknown = await res.json().catch(() => null);
+    if (!res.ok) {
+      console.error(`[paycrest] order list failed (${res.status})`, raw);
+      return NextResponse.json(
+        { error: `Couldn't load orders (${res.status}).` },
+        { status: 502 }
+      );
+    }
 
-  const data =
-    raw && typeof raw === "object" ? (raw as Record<string, unknown>).data : null;
-  const list =
-    data &&
-    typeof data === "object" &&
-    Array.isArray((data as Record<string, unknown>).orders)
-      ? ((data as Record<string, unknown>).orders as Record<string, unknown>[])
+    const data =
+      raw && typeof raw === "object"
+        ? ((raw as Record<string, unknown>).data as Record<string, unknown>)
+        : null;
+    const orders = Array.isArray(data?.orders)
+      ? (data.orders as Record<string, unknown>[])
       : [];
+    list.push(...orders);
+    const total = Number(data?.total ?? 0);
+    if (orders.length < PAGE_SIZE || (total && list.length >= total)) break;
+  }
 
   const orders: PaycrestHistoryOrder[] = list
     .filter((o) => orderMatchesWallet(o, address))

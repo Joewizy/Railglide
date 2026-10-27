@@ -28,7 +28,9 @@ export function usePaycrestRate(
   token: string,
   /** Skip fetching entirely when false — e.g. a non-Paycrest (Chainrails) chain
    *  is selected, so Paycrest's rate is irrelevant and shouldn't be requested. */
-  enabled = true
+  enabled = true,
+  /** Buy (on-ramp) and Sell (off-ramp) use different rates. */
+  side: "buy" | "sell" = "sell"
 ): UsePaycrestRateReturn {
   const [rate, setRate] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,7 +46,7 @@ export function usePaycrestRate(
     setRate(null);
 
     const load = async () => {
-      const r = await fetchPaycrestRate(currency, token);
+      const r = await fetchPaycrestRate(currency, token, side);
       if (cancelled) return;
       setRate(r);
       setLoading(false);
@@ -56,7 +58,7 @@ export function usePaycrestRate(
       cancelled = true;
       clearInterval(id);
     };
-  }, [currency, token, enabled]);
+  }, [currency, token, enabled, side]);
 
   return { rate, loading };
 }

@@ -8,16 +8,20 @@
  */
 
 import { isPaycrestFiat } from "@/rails/paycrest";
+import { cachedFetch } from "./cachedFetch";
 
 /** Current fiat-per-token rate, or null if it can't be fetched. */
 export async function fetchPaycrestRate(
   currency: string,
-  token: string
+  token: string,
+  /** Buy (on-ramp) and Sell (off-ramp) use different rates. */
+  side: "buy" | "sell" = "sell"
 ): Promise<number | null> {
   if (!currency || !token || !isPaycrestFiat(currency)) return null;
   try {
-    const res = await fetch(
-      `/api/paycrest/rate?fiat=${encodeURIComponent(currency)}&token=${token}`
+    // Cached for a minute, so switching back to a currency/token is instant.
+    const res = await cachedFetch(
+      `/api/paycrest/rate?fiat=${encodeURIComponent(currency)}&token=${token}&side=${side}`
     );
     const data = await res.json();
     if (res.ok && data?.rate) {

@@ -137,6 +137,9 @@ export async function POST(req: NextRequest) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      // Order creation can be slow (the provider sets up the payment), so
+      // allow longer than a quote — but never hang forever.
+      signal: AbortSignal.timeout(30_000),
     });
     const data: unknown = await upstream.json().catch(() => null);
     if (!upstream.ok) {
@@ -183,7 +186,19 @@ export async function POST(req: NextRequest) {
       );
     }
     return NextResponse.json(data, { status: 201 });
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      console.error(`[chainrails ramp order] ${type} timed out after 30s`);
+      // The order may still have been created upstream — say so, so the user
+      // checks History instead of paying twice.
+      return NextResponse.json(
+        {
+          error:
+            "The provider is taking too long to respond. Check History before trying again — the order may still go through.",
+        },
+        { status: 504 }
+      );
+    }
     return NextResponse.json(
       { error: "Couldn't reach Chainrails to create the order." },
       { status: 502 }

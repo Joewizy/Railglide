@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { PAYCREST_BASE_URL, isPaycrestFiat } from "@/rails/paycrest";
 
 /**
- * GET /api/paycrest/rate?fiat=NGN&token=USDC
+ * GET /api/paycrest/rate?fiat=NGN&token=USDC&side=buy|sell
  *
- * Returns the current unit rate (fiat per 1 token) so the UI can estimate
- * the USDC a user receives for a fiat on-ramp before creating an order.
- * Proxies Paycrest's public /v1/rates/:token/1/:fiat (no key). Large
- * amounts can 503 (no provider), so we always price the unit rate.
+ * Returns the current unit rate (fiat per 1 token) for the on-screen estimate.
+ * Buy and Sell have different rates (e.g. buy 1,389.98 vs sell 1,374.12 NGN),
+ * so `side` picks one from Paycrest's public /v2/rates/:network/:token/:amount/:fiat
+ * — "use data.buy.rate for on-ramp, data.sell.rate for off-ramp" (their docs).
+ * Sell falls back to the older /v1 endpoint, which only knows the sell rate.
  */
 export async function GET(req: NextRequest) {
   const fiat = req.nextUrl.searchParams.get("fiat");
@@ -27,6 +28,33 @@ export async function GET(req: NextRequest) {
       { error: `Unsupported token "${token}"` },
       { status: 400 }
     );
+  }
+
+  const side = req.nextUrl.searchParams.get("side") === "buy" ? "buy" : "sell";
+  const network = req.nextUrl.searchParams.get("network") || "base";
+  if (!/^[a-z0-9-]+$/.test(network)) {
+    return NextResponse.json({ error: "Invalid network" }, { status: 400 });
+  }
+
+  try {
+    const v2 = await fetch(
+      `${PAYCREST_BASE_URL}/v2/rates/${network}/${token}/100/${fiat.toUpperCase()}?side=${side}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) }
+    );
+    const body = (await v2.json().catch(() => null)) as {
+      data?: Record<string, { rate?: string } | undefined>;
+    } | null;
+    const v2Rate = Number(body?.data?.[side]?.rate);
+    if (v2.ok && Number.isFinite(v2Rate) && v2Rate > 0) {
+      return NextResponse.json({ rate: v2Rate, fiat: fiat.toUpperCase(), token, side });
+    }
+    console.error(`[paycrest] v2 ${side} rate failed (${v2.status})`, body);
+  } catch (error) {
+    console.error(`[paycrest] v2 ${side} rate failed`, error);
+  }
+  // The v1 endpoint is sell-only, so a buy estimate has nothing to fall back on.
+  if (side === "buy") {
+    return NextResponse.json({ error: "Couldn't fetch a rate." }, { status: 502 });
   }
 
   let res: Response;
