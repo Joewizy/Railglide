@@ -11,6 +11,8 @@ import {
   isSettlementToken,
 } from "@/assistant/productRules";
 import { fetchPaycrestUnitRate, type PaycrestFiat } from "@/rails/paycrest";
+import { CHAINRAILS_OFFRAMP_ENABLED } from "@/rails/chainrails";
+import { BUY_COUNTRIES, SELL_COUNTRIES, countryLine } from "@/lib/rampCountries";
 
 const apiKey = process.env.GEMINI_API_KEY;
 const primaryModel = process.env.GEMINI_MODEL || "gemini-3.6-flash";
@@ -329,9 +331,13 @@ export async function POST(req: NextRequest) {
       [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
     rates = await resolveRates(lastUser);
 
+    const basePrompt = buildAssistantSystemPrompt({
+      buy: countryLine(BUY_COUNTRIES),
+      sell: CHAINRAILS_OFFRAMP_ENABLED ? countryLine(SELL_COUNTRIES) : null,
+    });
     const systemInstruction = rates
-      ? `${buildAssistantSystemPrompt()}\n\n${rates.modelNote}`
-      : buildAssistantSystemPrompt();
+      ? `${basePrompt}\n\n${rates.modelNote}`
+      : basePrompt;
     const contents = messages.map((m) => ({
       role: m.role === "assistant" ? ("model" as const) : ("user" as const),
       parts: [{ text: m.content }],

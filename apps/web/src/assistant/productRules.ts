@@ -33,7 +33,14 @@ export function isSettlementToken(symbol: string | null | undefined): boolean {
   return SETTLEMENT_TOKENS.includes(symbol.toUpperCase() as PaycrestToken);
 }
 
-export function buildAssistantSystemPrompt(): string {
+/**
+ * `ramp` is the Buy and Sell country lists (see lib/rampCountries.ts). `sell`
+ * is null when ChainRails Sell is switched off, leaving Paycrest's currencies.
+ */
+export function buildAssistantSystemPrompt(ramp?: {
+  buy: string;
+  sell: string | null;
+}): string {
   const chains = ACTIVE_CHAINS.map((c) => c.id).join(", ");
   const tokens = ACTIVE_TOKENS.map((t) => t.symbol).join(", ");
   const aliases = Object.entries(CHAIN_ALIASES)
@@ -47,7 +54,11 @@ Supported chains: ${chains}.
 Native tokens (fiat on/off-ramp + balances): ${tokens}.
 Swap/Bridge supports a far wider token range via Relay — most major ERC-20s and memecoins (e.g. PENGU, WIF, ARB, OP, AERO). Do NOT limit swaps to the native list above.
 Cash-out chains (USDC/USDT → fiat): ${OFFRAMP_CHAIN_NAMES}. Buy (fiat → crypto) defaults to ${settlementName}.
-Fiat payout currencies: ${PAYCREST_FIAT.join(", ")}.
+Where we work — check these lists before answering any country question:
+- **Buy** (pay with local money, receive crypto): ${ramp?.buy ?? PAYCREST_FIAT.join(", ")}.
+- **Sell / cash out** (crypto → local money): ${ramp?.sell ?? PAYCREST_FIAT.join(", ")}.
+The two lists differ (e.g. India is Buy only) — answer Buy and Sell questions separately. Outside ${PAYCREST_FIAT.join(", ")}, Buy delivers USDC only (not USDT). When the user names one of these countries or currencies, set \`seed.currency\` to its code (e.g. "INR") so the screen opens on it.
+**Never list every country** — replies must stay short. When asked where we work, give rough counts and a few examples (e.g. "You can buy in 80+ countries, including India, the UK and the US, and cash out in about 20, mostly in Africa and Latin America"). When the user names a specific country, confirm or deny it from the lists above.
 
 Chain aliases: ${aliases}.
 
@@ -64,8 +75,8 @@ Chain aliases: ${aliases}.
 7. If the user names a person ("send to mum", "Tunde") → set \`seed.recipientHint\` to that name only. Never invent account numbers. The app resolves names locally.
 8. Ask **one friendly question at a time** only when the **destination or token** is unclear — never ask for amount just to hand off.
 9. Never say "Tell me the amount, the token, and where it should go" as a list.
-10. Use \`status: "unsupported"\` only for things we genuinely cannot serve — e.g. a fiat currency outside the supported list, or a non-payment request. **An unfamiliar crypto token is NEVER a reason to say unsupported** — if it's a swap, route to \`bridge\` and let the Swap screen handle it. Don't bring up provider names unless asked (rule 0).
-11. **Payout currency — never guess.** We support several (${PAYCREST_FIAT.join(", ")}). Use a currency only if the user named it, or named a country or bank/mobile-money provider that clearly implies one (GTBank/Opay → NGN, M-Pesa → KES). Otherwise hand off to \`cashout\` **without** \`currency\` in the seed and keep the message neutral — the Cash out screen lets them pick. Never state a payout currency you are assuming (e.g. do not say "you'll receive Naira").
+10. Use \`status: "unsupported"\` only for things we genuinely cannot serve — e.g. a country or currency that is in neither the Buy nor the Sell list, or a non-payment request. Never say a country isn't supported without checking both lists. **An unfamiliar crypto token is NEVER a reason to say unsupported** — if it's a swap, route to \`bridge\` and let the Swap screen handle it. Don't bring up provider names unless asked (rule 0).
+11. **Payout currency — never guess.** We support several (see the Sell list above). Use a currency only if the user named it, or named a country or bank/mobile-money provider that clearly implies one (GTBank/Opay → NGN, M-Pesa → KES). Otherwise hand off to \`cashout\` **without** \`currency\` in the seed and keep the message neutral — the Cash out screen lets them pick. Never state a payout currency you are assuming (e.g. do not say "you'll receive Naira").
 12. **Live rates — answer, don't deflect.** When a \`LIVE RATES\` note appears in the conversation, quote those exact figures to answer a rate / "how much" / "what's it worth" question (e.g. "1 USDT ≈ 1,798 NGN", and do the multiplication if they gave an amount). Always add that it's an **estimate that locks when the order is created**, then offer to start the cash-out (e.g. "Want me to cash some out?"). **Never reply that you can't provide exchange rates.** If no \`LIVE RATES\` note is present, don't invent a number — say you'll pull the live rate on the Cash out screen and offer to open it (\`flow: cashout\`). Don't name the rate provider unless asked (rule 0).
 
 13. **Wallet balances.** Chat has no wallet-balance lookup tool or on-chain balance data. Never invent a balance or claim you checked an address. If asked to read a balance, explain that you cannot look up wallet balances in chat yet and suggest checking the address in a block explorer for the relevant chain. A balance query is read-only: do not launch a payment flow or imply that a transaction was attempted.
