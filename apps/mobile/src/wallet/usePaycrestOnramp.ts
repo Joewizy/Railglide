@@ -13,7 +13,7 @@ import {
   humanizePaycrestError,
   isPaycrestFiat,
   paycrestNetworkSlug,
-  paycrestPayoutInFlight,
+  paycrestOnrampPaid,
   type PaycrestFiat,
   type PaycrestOrder,
   type PaycrestRecipient,
@@ -173,7 +173,7 @@ export function usePaycrestOnramp() {
         return;
       }
       setStatus(
-        paycrestPayoutInFlight(fetched) ? "settling" : "awaiting_deposit"
+        paycrestOnrampPaid(fetched) ? "settling" : "awaiting_deposit"
       );
     } catch (err) {
       setError(
@@ -197,7 +197,7 @@ export function usePaycrestOnramp() {
         const latest = await getOrder(orderId);
         if (stopped) return;
         setOrder(latest);
-        if (paycrestPayoutInFlight(latest)) {
+        if (paycrestOnrampPaid(latest)) {
           setStatus((s) => (s === "awaiting_deposit" ? "settling" : s));
         }
         const outcome = classifyPaycrestOrder(latest, "onramp");

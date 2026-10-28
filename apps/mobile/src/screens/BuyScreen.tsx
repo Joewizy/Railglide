@@ -74,6 +74,7 @@ import {
   tokenOptions,
 } from "@/components/options";
 import { theme } from "@/theme";
+import { useTokenSupport } from "@/lib/useTokenSupport";
 
 const TOKENS: PaycrestToken[] = ["USDC", "USDT"];
 
@@ -111,14 +112,27 @@ export function BuyScreen() {
   );
   const [rate, setRate] = useState<number | null>(null);
 
+  // Only chains where the token is actually supported (live list, with a
+  // built-in fallback). ChainRails only delivers USDC, so its chains need USDC
+  // there — Tron has none, so it never shows.
+  const tokens = useTokenSupport();
+  const tokenChains = chains.filter((id) => tokens.paycrest(id, token));
+  // Switching token: move off a chain that doesn't carry it.
+  const firstTokenChain = tokenChains[0];
+  const chainOk = tokenChains.includes(chain);
+  useEffect(() => {
+    if (!chainOk && firstTokenChain) setChain(firstTokenChain);
+  }, [chainOk, firstTokenChain]);
+
   // Paycrest chains (with logos) first, then the ChainRails-only chains — one
-  // flat list; a `cr:` value routes to the ChainRails flow. ChainRails only
-  // delivers USDC, so its chains are hidden when the user wants USDT.
+  // flat list; a `cr:` value routes to the ChainRails flow.
   const chainPickerOptions = useMemo(
     () => [
-      ...chainOptions(chains),
+      ...chainOptions(tokenChains),
       ...(token === "USDC"
-        ? CHAINRAILS_RAMP_DESTINATIONS.map((d) => ({
+        ? CHAINRAILS_RAMP_DESTINATIONS.filter((d) =>
+            tokens.chainrails(d.chainrailsChain, "USDC")
+          ).map((d) => ({
             value: `cr:${d.chainrailsChain}`,
             label: d.label,
             icon: (
@@ -131,7 +145,7 @@ export function BuyScreen() {
           }))
         : []),
     ],
-    [chains, token]
+    [tokenChains, token, tokens]
   );
 
   // Receiving wallet — defaults to the connected wallet, but the user can paste
@@ -241,7 +255,7 @@ export function BuyScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    getRate(currency, token)
+    getRate(currency, token, "buy")
       .then((r) => !cancelled && setRate(r.rate))
       .catch(() => !cancelled && setRate(null));
     return () => {

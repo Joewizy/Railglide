@@ -118,6 +118,8 @@ export interface PaycrestOrder {
   txHash?: string;
   createdAt: string;
   updatedAt?: string;
+  /** Paycrest's order log, passed through by the backend (statuses only). */
+  raw?: { transactionLogs?: { status: string; created_at?: string }[] };
 }
 
 /**
@@ -141,6 +143,19 @@ export function paycrestAmountDue(
 }
 
 export type PaycrestOutcome = "success" | "failed" | "expired" | "pending";
+
+/**
+ * Buy: the buyer's bank transfer has arrived. A new Buy order is already
+ * "pending" while it waits, so status alone can't say this — a paid order logs
+ * "order_fulfilling" (then settling → settled). Mirrors apps/web/src/rails/paycrest.ts.
+ */
+export function paycrestOnrampPaid(order: PaycrestOrder): boolean {
+  if (Number(order.amountPaid ?? 0) > 0) return true;
+  if (paycrestPayoutInFlight(order)) return true;
+  return (order.raw?.transactionLogs ?? []).some(
+    (l) => l.status === "order_fulfilling" || l.status === "order_settling"
+  );
+}
 
 /** True once the provider has started paying out (on-ramp timeline → settling). */
 export function paycrestPayoutInFlight(order: PaycrestOrder): boolean {

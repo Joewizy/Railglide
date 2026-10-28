@@ -11,7 +11,8 @@
     "./network": "./src/network.ts",
     "./types": "./src/types/index.ts",
     "./assistant/types": "./src/assistant/types.ts",
-    "./kyc": "./src/kyc.ts"
+    "./kyc": "./src/kyc.ts",
+    "./tokenSupport": "./src/tokenSupport.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

@@ -15,13 +15,17 @@ export interface RateResponse {
   token: string;
 }
 
-/** Live unit rate (fiat per 1 token). The exact rate locks at order creation. */
+/**
+ * Live unit rate (fiat per 1 token). The exact rate locks at order creation.
+ * Buy and Sell have different rates (buy is higher), so pass the side.
+ */
 export function getRate(
   fiat: PaycrestFiat,
-  token: PaycrestToken
+  token: PaycrestToken,
+  side: "buy" | "sell" = "sell"
 ): Promise<RateResponse> {
   return apiFetch<RateResponse>(
-    `/api/paycrest/rate?fiat=${fiat}&token=${token}`
+    `/api/paycrest/rate?fiat=${fiat}&token=${token}&side=${side}`
   );
 }
 

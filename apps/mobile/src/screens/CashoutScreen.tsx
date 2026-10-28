@@ -51,6 +51,7 @@ import {
   saveComposeDraft,
 } from "@/lib/composeDraft";
 import { theme } from "@/theme";
+import { useTokenSupport } from "@/lib/useTokenSupport";
 
 const TOKENS: PaycrestToken[] = ["USDC", "USDT"];
 
@@ -182,6 +183,19 @@ export function CashoutScreen() {
 
   // Connected wallet's balance of the selected token on the selected chain, so
   // the user can't try to sell more than they hold (the transfer would revert).
+  // Only chains where Paycrest supports the token (live list, with a built-in
+  // fallback) and we have its contract address to send from.
+  const tokens = useTokenSupport();
+  const tokenChains = chains.filter(
+    (id) => !!getTokenAddress(token, id) && tokens.paycrest(id, token)
+  );
+  // Switching token: move off a chain that doesn't carry it.
+  const firstTokenChain = tokenChains[0];
+  const chainOk = tokenChains.includes(chain);
+  useEffect(() => {
+    if (!chainOk && firstTokenChain) setChain(firstTokenChain);
+  }, [chainOk, firstTokenChain]);
+
   const tokenAddress = getTokenAddress(token, chain);
   const viemChainId = getChain(chain)?.viemChain?.id;
   const balanceQuery = useBalance({
@@ -301,7 +315,7 @@ export function CashoutScreen() {
             <Picker
               title="From chain"
               value={chain}
-              options={chainOptions(chains)}
+              options={chainOptions(tokenChains)}
               onChange={(c) => setChain(c as ChainId)}
             />
           </Field>
