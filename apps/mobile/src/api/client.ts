@@ -29,7 +29,9 @@ export const API_HOST = API_URL.replace(/^https?:\/\//, "").replace(
 export class ApiError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    /** The parsed JSON error body, when there was one (e.g. { needsName }). */
+    readonly data?: Record<string, unknown>
   ) {
     super(message);
     this.name = "ApiError";
@@ -51,7 +53,15 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new ApiError(parseErrorBody(body, path, res.status), res.status);
+    let data: Record<string, unknown> | undefined;
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (parsed && typeof parsed === "object")
+        data = parsed as Record<string, unknown>;
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(parseErrorBody(body, path, res.status), res.status, data);
   }
 
   return (await res.json()) as T;

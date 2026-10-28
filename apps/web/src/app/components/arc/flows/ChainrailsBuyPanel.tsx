@@ -39,7 +39,6 @@ import {
   Notice,
   PrimaryButton,
   RateLine,
-  Reassurance,
 } from "../ui/sendKit";
 import { CurrencyPicker, type CountryOption } from "../ui/sendPickers";
 import { PickerSheet } from "../ui/PickerSheet";
@@ -805,9 +804,6 @@ export function ChainrailsBuyPanel({
           </>
         )}
       </PrimaryButton>
-      <Reassurance>
-        You&apos;ll see the exact amount to pay before anything is charged.
-      </Reassurance>
     </div>
   );
 }

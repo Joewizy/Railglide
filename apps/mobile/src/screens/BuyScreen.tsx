@@ -1,103 +1,100 @@
+// Buy (local currency → stablecoin), in the redesign's layout:
+//   1. Amount — "You pay" in local currency, rate, "You receive" with token + chain
+//   2. Review — where the USDC goes, refund account, your details
+//   3. Pay — "Pay into this account", locked quote, progress, countdown
+//      (or the calm expired page)
+// Picking a ChainRails chain hands off to ChainrailsBuyFlow.
+// Mirrors the website's BuyFlow → BuyReview → PaycrestOrderScreen.
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  ScrollView,
-  ActivityIndicator,
-  Pressable,
-  StyleSheet,
-  type ViewProps,
-} from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { isAddress } from "viem";
 import { useAccount } from "wagmi";
-import {
-  ACTIVE_CHAINS,
-  getChain,
-  type ChainId,
-} from "@railglide/shared/network";
+import { ACTIVE_CHAINS, getChain, type ChainId } from "@railglide/shared/network";
+import { checkBuyerDetails, trimBuyerDetails, type BuyerDetails } from "@railglide/shared/kyc";
 import { useSession } from "@/store/session";
-import { useWalletAuth } from "@/wallet/useWalletAuth";
 import { usePaycrestOnramp } from "@/wallet/usePaycrestOnramp";
-import { getInstitutions, getRate, verifyAccount } from "@/api/paycrest";
+import { getRate } from "@/api/paycrest";
 import {
   buildPaycrestReference,
+  paycrestOnrampPaid,
   PAYCREST_CHAIN_IDS,
   PAYCREST_FIAT,
   type PaycrestFiat,
-  type PaycrestInstitution,
   type PaycrestToken,
 } from "@/rails/paycrest";
-import {
-  CHAINRAILS_RAMP_DESTINATIONS,
-  type RampDestination,
-} from "@/rails/chainrails";
+import { CHAINRAILS_RAMP_DESTINATIONS, type RampDestination } from "@/rails/chainrails";
 import { ChainrailsBuyFlow } from "./ChainrailsBuyFlow";
-import {
-  checkBuyerDetails,
-  trimBuyerDetails,
-  type BuyerDetails,
-} from "@railglide/shared/kyc";
 import { BuyerDetailsFields } from "@/components/BuyerDetailsFields";
-import {
-  clearBuyerDetails,
-  loadBuyerDetails,
-  saveBuyerDetails,
-} from "@/store/buyerDetails";
-import { ApiError } from "@/api/client";
-import {
-  Field,
-  Intro,
-  PageTitle,
-  Primary,
-  Row,
-  Secondary,
-  formStyles as f,
-} from "@/components/form";
-import { Picker } from "@/components/Picker";
-import { ChainLogo, RampLogo } from "@/components/Logo";
+import { clearBuyerDetails, loadBuyerDetails, saveBuyerDetails } from "@/store/buyerDetails";
+import { ChainLogo, RampLogo, TokenLogo } from "@/components/Logo";
 import { Confetti } from "@/components/Confetti";
 import { SuccessCheck } from "@/components/SuccessCheck";
-import {
-  clearComposeDraft,
-  loadComposeDraft,
-  saveComposeDraft,
-} from "@/lib/composeDraft";
-import { copyToClipboard } from "@/lib/clipboard";
-import { fiatSymbol, formatFiat } from "@/lib/format";
-import { PrefixedAmountInput } from "@/components/PrefixedAmountInput";
-import {
-  chainOptions,
-  currencyOptions,
-  institutionOptions,
-  tokenOptions,
-} from "@/components/options";
-import { theme } from "@/theme";
+import { clearComposeDraft, loadComposeDraft, saveComposeDraft } from "@/lib/composeDraft";
+import { FIAT_INFO, formatFiat, formatToken } from "@/lib/format";
 import { useTokenSupport } from "@/lib/useTokenSupport";
+import { CurrencySheet, TokenChainSheet, type CurrencyOption } from "@/components/flowPickers";
+import {
+  BankAccount,
+  EMPTY_ACCOUNT,
+  accountBlocker,
+  type BankAccountValue,
+  type LookupState,
+} from "@/components/BankAccount";
+import { ExpiredOrder } from "@/components/ExpiredOrder";
+import {
+  AmountCard,
+  Card,
+  CopyRow,
+  CurrencyPill,
+  DetailRows,
+  FieldLabel,
+  FlowHeader,
+  FlowScreen,
+  Notice,
+  PrimaryButton,
+  ProgressList,
+  RateLine,
+  SecondaryButton,
+  StepProgress,
+  TextField,
+  TextLink,
+  TokenChainPill,
+  clockTime,
+  kitStyles,
+  short0x,
+} from "@/components/kit";
+import { theme, z, zf } from "@/theme";
 
+const c = theme.flow;
 const TOKENS: PaycrestToken[] = ["USDC", "USDT"];
+const STEPS = ["Amount", "Review", "Pay"];
 
 function buyChains(): ChainId[] {
-  return PAYCREST_CHAIN_IDS.filter((id) =>
-    ACTIVE_CHAINS.some((c) => c.id === id)
-  );
+  return PAYCREST_CHAIN_IDS.filter((id) => ACTIVE_CHAINS.some((ch) => ch.id === id));
 }
 
-type Step = "compose" | "recipient" | "review";
+const currencyOption = (code: string): CurrencyOption => ({
+  value: code,
+  code,
+  flag: FIAT_INFO[code]?.flag ?? "🌍",
+  country: FIAT_INFO[code]?.country ?? code,
+  name: FIAT_INFO[code]?.name ?? code,
+});
+
+type Step = "amount" | "review";
 
 export function BuyScreen() {
   const launch = useSession((s) => s.pendingLaunch);
   const setPendingLaunch = useSession((s) => s.setPendingLaunch);
   const resumeOrder = useSession((s) => s.resumeOrder);
   const setResumeOrder = useSession((s) => s.setResumeOrder);
-  const { address, isConnected } = useAccount();
-  const { connect } = useWalletAuth();
+  const { address } = useAccount();
   const onramp = usePaycrestOnramp();
 
   const chains = useMemo(buyChains, []);
-  const [step, setStep] = useState<Step>("compose");
-  // Non-Paycrest destination → ChainRails Buy flow. Null on a Paycrest chain.
+  const [step, setStep] = useState<Step>("amount");
+  // A ChainRails chain hands off to the ChainRails Buy flow.
   const [crDest, setCrDest] = useState<RampDestination | null>(null);
   const [crResumeId, setCrResumeId] = useState<string | null>(null);
 
@@ -105,70 +102,22 @@ export function BuyScreen() {
   const [token, setToken] = useState<PaycrestToken>("USDC");
   const [chain, setChain] = useState<ChainId>(chains[0]);
   const [currency, setCurrency] = useState<PaycrestFiat>(
-    (launch?.currency as PaycrestFiat) &&
-      PAYCREST_FIAT.includes(launch!.currency as PaycrestFiat)
+    (launch?.currency as PaycrestFiat) && PAYCREST_FIAT.includes(launch!.currency as PaycrestFiat)
       ? (launch!.currency as PaycrestFiat)
       : "NGN"
   );
   const [rate, setRate] = useState<number | null>(null);
+  const [chainOpen, setChainOpen] = useState(false);
+  const [currencyOpen, setCurrencyOpen] = useState(false);
 
-  // Only chains where the token is actually supported (live list, with a
-  // built-in fallback). ChainRails only delivers USDC, so its chains need USDC
-  // there — Tron has none, so it never shows.
-  const tokens = useTokenSupport();
-  const tokenChains = chains.filter((id) => tokens.paycrest(id, token));
-  // Switching token: move off a chain that doesn't carry it.
-  const firstTokenChain = tokenChains[0];
-  const chainOk = tokenChains.includes(chain);
-  useEffect(() => {
-    if (!chainOk && firstTokenChain) setChain(firstTokenChain);
-  }, [chainOk, firstTokenChain]);
-
-  // Paycrest chains (with logos) first, then the ChainRails-only chains — one
-  // flat list; a `cr:` value routes to the ChainRails flow.
-  const chainPickerOptions = useMemo(
-    () => [
-      ...chainOptions(tokenChains),
-      ...(token === "USDC"
-        ? CHAINRAILS_RAMP_DESTINATIONS.filter((d) =>
-            tokens.chainrails(d.chainrailsChain, "USDC")
-          ).map((d) => ({
-            value: `cr:${d.chainrailsChain}`,
-            label: d.label,
-            icon: (
-              <RampLogo
-                chainrailsChain={d.chainrailsChain}
-                label={d.label}
-                size={24}
-              />
-            ),
-          }))
-        : []),
-    ],
-    [tokenChains, token, tokens]
-  );
-
-  // Receiving wallet — defaults to the connected wallet, but the user can paste
-  // any address to receive the crypto elsewhere.
+  // Review
   const [recipient, setRecipient] = useState("");
-  const recipientValid = isAddress(recipient);
-
-  const [institutions, setInstitutions] = useState<PaycrestInstitution[]>([]);
-  const [providersError, setProvidersError] = useState<string | null>(null);
-  const [institution, setInstitution] = useState<PaycrestInstitution | null>(
-    null
-  );
-  const [account, setAccount] = useState("");
-  const [accountName, setAccountName] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState(false);
-  const [recipientError, setRecipientError] = useState<string | null>(null);
-
-  // Date of birth + NIN (or ID) — Paycrest needs them on every Buy order.
-  // Prefilled from the copy saved on this device.
+  const [refund, setRefund] = useState<BankAccountValue>(EMPTY_ACCOUNT);
+  const [lookup, setLookup] = useState<LookupState>("idle");
   const [buyer, setBuyer] = useState<BuyerDetails>({ birthDate: "" });
-  // On by default; turning it off forgets any copy saved on the device.
   const [rememberBuyer, setRememberBuyer] = useState(true);
   const [buyerSaved, setBuyerSaved] = useState(false);
+
   useEffect(() => {
     void loadBuyerDetails().then((saved) => {
       if (!saved) return;
@@ -176,14 +125,11 @@ export function BuyScreen() {
       setBuyerSaved(true);
     });
   }, []);
-  const buyerProblems = checkBuyerDetails(currency, buyer);
 
   useEffect(() => () => setPendingLaunch(null), [setPendingLaunch]);
 
-  // Restore a half-filled Buy form (from a prior visit / app restart) so nothing
-  // has to be retyped. A chat launch wins, so we only restore without one.
-  // `hydrated` gates the save effect so it can't overwrite the draft with the
-  // blank initial state before the restore lands.
+  // Restore a half-filled Buy form (prior visit / app restart). A chat launch
+  // wins. `hydrated` stops the save effect clobbering the draft before restore.
   const hydrated = useRef(false);
   useEffect(() => {
     let active = true;
@@ -196,9 +142,7 @@ export function BuyScreen() {
             setCurrency(d.currency as PaycrestFiat);
           if (d.token === "USDC" || d.token === "USDT") setToken(d.token);
           if (d.crChain) {
-            const dest = CHAINRAILS_RAMP_DESTINATIONS.find(
-              (x) => x.chainrailsChain === d.crChain
-            );
+            const dest = CHAINRAILS_RAMP_DESTINATIONS.find((x) => x.chainrailsChain === d.crChain);
             if (dest) setCrDest(dest);
           } else if (d.chain && chains.includes(d.chain as ChainId)) {
             setChain(d.chain as ChainId);
@@ -215,23 +159,14 @@ export function BuyScreen() {
 
   useEffect(() => {
     if (!hydrated.current) return;
-    void saveComposeDraft("buy", {
-      amount,
-      currency,
-      token,
-      chain,
-      crChain: crDest?.chainrailsChain,
-    });
+    void saveComposeDraft("buy", { amount, currency, token, chain, crChain: crDest?.chainrailsChain });
   }, [amount, currency, token, chain, crDest]);
 
   // Resume a Buy order tapped in History.
   useEffect(() => {
     if (!resumeOrder) return;
-    // ChainRails ramp order → open the ChainRails flow at its status screen.
     if (resumeOrder.chainrailsChain) {
-      const dest = CHAINRAILS_RAMP_DESTINATIONS.find(
-        (d) => d.chainrailsChain === resumeOrder.chainrailsChain
-      );
+      const dest = CHAINRAILS_RAMP_DESTINATIONS.find((d) => d.chainrailsChain === resumeOrder.chainrailsChain);
       if (dest) {
         setCrDest(dest);
         setCrResumeId(resumeOrder.id);
@@ -246,13 +181,13 @@ export function BuyScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resumeOrder]);
 
-  // Prefill the receiving wallet with the connected address once, without
-  // clobbering an address the user has since typed.
+  // Prefill where the USDC goes with the connected wallet, without clobbering
+  // an address the user has typed.
   useEffect(() => {
-    if (address && !recipient) setRecipient(address);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (address) setRecipient((cur) => cur || address);
   }, [address]);
 
+  // Buy rate (higher than the sell rate) for the estimate.
   useEffect(() => {
     let cancelled = false;
     getRate(currency, token, "buy")
@@ -263,53 +198,23 @@ export function BuyScreen() {
     };
   }, [currency, token]);
 
+  // Only chains where the token is supported (live list, with a fallback).
+  // ChainRails only delivers USDC, so its chains need USDC — Tron has none.
+  const tokens = useTokenSupport();
+  const tokenChains = chains.filter((id) => tokens.paycrest(id, token));
+  const firstTokenChain = tokenChains[0];
+  const chainOk = tokenChains.includes(chain);
   useEffect(() => {
-    let cancelled = false;
-    setInstitutions([]);
-    setProvidersError(null);
-    getInstitutions(currency)
-      .then((list) => !cancelled && setInstitutions(list))
-      .catch((err) => {
-        if (cancelled) return;
-        setInstitutions([]);
-        setProvidersError(
-          err instanceof ApiError
-            ? err.message
-            : "Couldn't load providers — check that the app can reach the backend."
-        );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currency]);
+    if (!chainOk && firstTokenChain) setChain(firstTokenChain);
+  }, [chainOk, firstTokenChain]);
 
-  // Fiat in → crypto out: divide the fiat amount by the unit rate.
-  const estimate =
-    rate && Number(amount) > 0
-      ? (Number(amount) / rate).toLocaleString("en-US", {
-          maximumFractionDigits: 2,
-        })
-      : null;
-
-  const doVerify = async () => {
-    if (!institution || !account.trim()) return;
-    setVerifying(true);
-    setRecipientError(null);
-    setAccountName(null);
-    try {
-      setAccountName(await verifyAccount(institution.code, account.trim()));
-    } catch (err) {
-      setRecipientError(
-        err instanceof ApiError ? err.message : "Couldn't verify that account."
-      );
-    } finally {
-      setVerifying(false);
-    }
-  };
+  const amountNum = Number(amount) || 0;
+  const estimate = rate && amountNum > 0 ? amountNum / rate : null;
+  const chainName = getChain(chain)?.name ?? chain;
+  const recipientValid = isAddress(recipient.trim());
+  const buyerProblems = checkBuyerDetails(currency, buyer);
 
   const createOrder = async () => {
-    if (!institution || !accountName || !recipientValid) return;
-    if (buyerProblems.length > 0) return;
     const buyerToSend = trimBuyerDetails(currency, buyer);
     if (rememberBuyer) void saveBuyerDetails(buyerToSend);
     try {
@@ -319,38 +224,85 @@ export function BuyScreen() {
         amount: amount.trim(),
         fiatCurrency: currency,
         refundAccount: {
-          institution: institution.code,
-          accountIdentifier: account.trim(),
-          accountName,
+          institution: refund.institution,
+          accountIdentifier: refund.accountIdentifier.trim(),
+          accountName: refund.accountName.trim(),
         },
         buyer: buyerToSend,
-        recipientAddress: recipient as `0x${string}`,
-        reference: buildPaycrestReference("onramp", recipient),
+        recipientAddress: recipient.trim() as `0x${string}`,
+        reference: buildPaycrestReference("onramp", recipient.trim()),
       });
-      // Order placed — drop the saved draft so a fresh buy starts clean.
       void clearComposeDraft("buy");
     } catch {
       // surfaced via onramp.error
     }
   };
+  const reviewBlocker =
+    !recipientValid
+      ? "Enter your wallet address"
+      : (accountBlocker(refund, lookup) ?? (buyerProblems[0]?.replace(/\.$/, "") || null));
 
-  // Full reset back to a blank compose form — used by "New order" so it never
-  // lands on the previous order's review/settling state.
-  const newOrder = () => {
-    onramp.reset();
-    setStep("compose");
-    setAmount("");
-    setAccount("");
-    setAccountName(null);
-    setInstitution(null);
-    setRecipientError(null);
-  };
+  // The token + chain picker, shared with the ChainRails flow.
+  const chainPicker = (
+    <>
+      <TokenChainPill
+        token={crDest ? "USDC" : token}
+        chainName={crDest?.label ?? chainName}
+        tokenLogo={<TokenLogo symbol={crDest ? "USDC" : token} size={z(28)} />}
+        chainLogo={
+          crDest ? (
+            <RampLogo chainrailsChain={crDest.chainrailsChain} label={crDest.label} size={z(11)} />
+          ) : (
+            <ChainLogo id={chain} size={z(11)} />
+          )
+        }
+        onPress={() => setChainOpen(true)}
+      />
+      <TokenChainSheet
+        open={chainOpen}
+        onClose={() => setChainOpen(false)}
+        title="Receive on"
+        hint="The chain your stablecoin lands on. Base, Arbitrum and Polygon have near-zero fees."
+        token={crDest ? "USDC" : token}
+        tokens={TOKENS}
+        onTokenChange={(t) => {
+          setToken(t as PaycrestToken);
+          if (t === "USDT") setCrDest(null);
+        }}
+        chains={[
+          ...tokenChains.map((id) => ({
+            value: id,
+            label: getChain(id)?.name ?? id,
+            logo: <ChainLogo id={id} size={z(28)} />,
+          })),
+          ...((crDest ? "USDC" : token) === "USDC"
+            ? CHAINRAILS_RAMP_DESTINATIONS.filter((d) => tokens.chainrails(d.chainrailsChain, "USDC")).map((d) => ({
+                value: `cr:${d.chainrailsChain}`,
+                label: d.label,
+                logo: <RampLogo chainrailsChain={d.chainrailsChain} label={d.label} size={z(28)} />,
+              }))
+            : []),
+        ]}
+        value={crDest ? `cr:${crDest.chainrailsChain}` : chain}
+        onSelect={(v) => {
+          if (v.startsWith("cr:")) {
+            const dest = CHAINRAILS_RAMP_DESTINATIONS.find((d) => `cr:${d.chainrailsChain}` === v);
+            if (dest) setCrDest(dest);
+            return;
+          }
+          setCrDest(null);
+          setChain(v as ChainId);
+        }}
+      />
+    </>
+  );
 
   if (crDest) {
     return (
       <ChainrailsBuyFlow
         destination={crDest}
         resumeOrderId={crResumeId ?? undefined}
+        chainPicker={chainPicker}
         onBack={() => {
           setCrDest(null);
           setCrResumeId(null);
@@ -361,731 +313,406 @@ export function BuyScreen() {
 
   if (onramp.status !== "idle") {
     return (
-      <OnrampStatus
+      <BuyOrder
         onramp={onramp}
         token={token}
         chain={chain}
+        currency={currency}
         recipient={recipient}
-        onNewOrder={newOrder}
+        typedAmount={amountNum}
+        todaysRate={rate}
+        onNewOrder={() => {
+          onramp.reset();
+          setStep("amount");
+        }}
+        onNewDetails={() => {
+          // Same amount, wallet and refund account at today's rate. Orders
+          // reopened from History don't carry those, so go back to the form.
+          onramp.reset();
+          if (reviewBlocker === null && amountNum > 0) void createOrder();
+          else setStep("amount");
+        }}
       />
     );
   }
 
-  return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {step !== "review" && (
-        <>
-          <PageTitle>Buy</PageTitle>
-          <Intro>{`Pay with local currency, receive ${token} in your wallet.`}</Intro>
-        </>
-      )}
+  // ---- 2. Review ----
+  if (step === "review") {
+    return (
+      <FlowScreen onBack={() => setStep("amount")} backLabel="Back to amount">
+        <StepProgress steps={STEPS} current={1} />
+        <FlowHeader title="Review your purchase" />
 
-      {step === "compose" && (
-        <>
-          <Field label={`Amount (${currency})`}>
-            <PrefixedAmountInput
-              amount={amount}
-              onChange={setAmount}
-              prefix={fiatSymbol(currency)}
+        <Card>
+          <View style={st.legs}>
+            <View style={{ flex: 1 }}>
+              <Text style={kitStyles.small}>You pay</Text>
+              <Text style={st.legAmount}>{formatFiat(currency, amountNum)}</Text>
+              <Text style={kitStyles.small}>{FIAT_INFO[currency]?.name ?? currency}</Text>
+            </View>
+            <Feather name="arrow-right" size={18} color={c.muted} />
+            <View style={{ flex: 1, alignItems: "flex-end" }}>
+              <Text style={kitStyles.small}>You receive</Text>
+              <Text style={st.legAmount}>{estimate !== null ? `≈ ${formatToken(estimate, token, 2)}` : "—"}</Text>
+              <Text style={kitStyles.small}>on {chainName}</Text>
+            </View>
+          </View>
+          {rate ? (
+            <DetailRows rows={[{ label: "Rate", value: `1 ${token} ≈ ${rate.toLocaleString("en-US")} ${currency}` }]} />
+          ) : null}
+          <View style={st.editRow}>
+            <Text style={[kitStyles.small, { flex: 1 }]}>The rate locks on the next step and can move slightly.</Text>
+            <TextLink label="Edit" onPress={() => setStep("amount")} />
+          </View>
+        </Card>
+
+        <Card>
+          <View style={{ gap: 6 }}>
+            <FieldLabel>{`Receive ${token} to`}</FieldLabel>
+            <TextField
+              mono
+              value={recipient}
+              onChangeText={setRecipient}
+              placeholder={`Your ${chainName} wallet address`}
+              autoCapitalize="none"
             />
-          </Field>
-          <Field label="Pay with">
-            <Picker
+            {recipient.trim() && !recipientValid ? (
+              <Text style={st.err}>That doesn&apos;t look like a valid {chainName} address.</Text>
+            ) : null}
+          </View>
+
+          <View style={st.divider} />
+          <View style={{ gap: 2 }}>
+            <Text style={st.sectionTitle}>Refund account</Text>
+            <Text style={kitStyles.small}>This account will be used for any refunds. Use one in your name.</Text>
+          </View>
+          <BankAccount
+            currency={currency}
+            value={refund}
+            onChange={setRefund}
+            onLookupChange={setLookup}
+            wrongLabel="Not yours?"
+          />
+
+          <View style={st.divider} />
+          <BuyerDetailsFields
+            currency={currency}
+            value={buyer}
+            onChange={setBuyer}
+            remember={rememberBuyer}
+            onRememberChange={(on) => {
+              setRememberBuyer(on);
+              if (!on) {
+                void clearBuyerDetails();
+                setBuyerSaved(false);
+              }
+            }}
+            saved={buyerSaved}
+          />
+        </Card>
+
+        {onramp.error ? <Notice tone="error">{onramp.error}</Notice> : null}
+        <PrimaryButton
+          label={reviewBlocker ?? "Continue to payment"}
+          disabled={!!reviewBlocker}
+          arrow
+          onPress={() => void createOrder()}
+        />
+        <Text style={[kitStyles.small, { textAlign: "center" }]}>
+          You&apos;ll see the account to pay into next. Your {token} arrives once the payment clears.
+        </Text>
+      </FlowScreen>
+    );
+  }
+
+  // ---- 1. Amount ----
+  return (
+    <FlowScreen>
+      <FlowHeader title="Buy crypto" subtitle="Pay with local currency, receive USDC in your wallet." />
+      <StepProgress steps={STEPS} current={0} />
+
+      <AmountCard
+        label="You pay"
+        value={amount}
+        onChange={setAmount}
+        pill={
+          <>
+            <CurrencyPill
+              flag={FIAT_INFO[currency]?.flag ?? "🌍"}
+              code={currency}
+              country={FIAT_INFO[currency]?.country ?? currency}
+              onPress={() => setCurrencyOpen(true)}
+            />
+            <CurrencySheet
+              open={currencyOpen}
+              onClose={() => setCurrencyOpen(false)}
               title="Pay with"
               value={currency}
-              options={currencyOptions(PAYCREST_FIAT)}
-              onChange={(c) => setCurrency(c as PaycrestFiat)}
+              popular={PAYCREST_FIAT.map(currencyOption)}
+              onSelect={(o) => setCurrency(o.value as PaycrestFiat)}
             />
-          </Field>
-          <Field label="Receive token">
-            <Picker
-              title="Receive token"
-              value={token}
-              options={tokenOptions(TOKENS)}
-              onChange={(t) => setToken(t as PaycrestToken)}
-            />
-          </Field>
-          <Field label="On chain">
-            <Picker
-              title="Receive on"
-              searchable
-              value={chain}
-              options={chainPickerOptions}
-              onChange={(v) => {
-                if (v.startsWith("cr:")) {
-                  const dest = CHAINRAILS_RAMP_DESTINATIONS.find(
-                    (d) => `cr:${d.chainrailsChain}` === v
-                  );
-                  if (dest) setCrDest(dest);
-                  return;
-                }
-                setChain(v as ChainId);
-              }}
-            />
-          </Field>
-          <Text style={f.estimate}>
-            {estimate
-              ? `≈ ${estimate} ${token}  (rate locks when you create the order)`
-              : "Enter an amount to see the estimate"}
-          </Text>
-          <Primary
-            label="Continue"
-            disabled={!(Number(amount) > 0)}
-            onPress={() => setStep("recipient")}
-          />
-        </>
-      )}
-
-      {step === "recipient" && (
-        <>
-          <Text style={f.estimate}>
-            Your {token} lands in the receiving wallet below. A refund account
-            is required in case the order can&apos;t be filled.
-          </Text>
-
-          {!isConnected ? (
-            <Primary label="Connect wallet" onPress={connect} />
-          ) : (
-            <Field label="Receiving wallet">
-              <TextInput
-                style={[
-                  f.input,
-                  recipient.length > 0 && !recipientValid && styles.inputError,
-                ]}
-                value={recipient}
-                onChangeText={setRecipient}
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="0x…"
-                placeholderTextColor={theme.colors.muted}
-              />
-              {address && recipient.toLowerCase() !== address.toLowerCase() && (
-                <Pressable onPress={() => setRecipient(address)}>
-                  <Text style={styles.useConnected}>Use connected wallet</Text>
-                </Pressable>
-              )}
-              {recipient.length > 0 && !recipientValid && (
-                <Text style={f.error}>Enter a valid wallet address.</Text>
-              )}
-            </Field>
-          )}
-
-          <Field label="Refund account — bank / mobile money">
-            <Picker
-              title="Choose provider"
-              searchable
-              placeholder={
-                institutions.length ? "Select provider" : "Loading providers…"
-              }
-              value={institution?.code}
-              options={institutionOptions(institutions)}
-              onChange={(code) => {
-                setInstitution(
-                  institutions.find((i) => i.code === code) ?? null
-                );
-                setAccountName(null);
-              }}
-            />
-          </Field>
-          {providersError && <Text style={f.error}>{providersError}</Text>}
-
-          {institution && (
-            <>
-              <Field label="Account number">
-                <TextInput
-                  style={f.input}
-                  value={account}
-                  onChangeText={(t) => {
-                    setAccount(t);
-                    setAccountName(null);
-                  }}
-                  keyboardType="number-pad"
-                  placeholder="Account / phone number"
-                  placeholderTextColor={theme.colors.muted}
-                />
-              </Field>
-              {accountName ? (
-                <Text style={styles.accountName}>✓ {accountName}</Text>
-              ) : (
-                <Primary
-                  label={verifying ? "Verifying…" : "Verify account"}
-                  disabled={!account.trim() || verifying}
-                  onPress={() => void doVerify()}
-                />
-              )}
-              {recipientError && <Text style={f.error}>{recipientError}</Text>}
-            </>
-          )}
-
-          {accountName && (
-            <BuyerDetailsFields
-              currency={currency}
-              value={buyer}
-              onChange={setBuyer}
-              remember={rememberBuyer}
-              onRememberChange={(on) => {
-                setRememberBuyer(on);
-                if (!on) {
-                  void clearBuyerDetails();
-                  setBuyerSaved(false);
-                }
-              }}
-              saved={buyerSaved}
-            />
-          )}
-          {accountName && buyerProblems.length > 0 && (
-            <Text style={f.estimate}>{buyerProblems[0]}</Text>
-          )}
-
-          <View style={f.rowButtons}>
-            <Secondary label="Back" onPress={() => setStep("compose")} />
-            <Primary
-              label="Review"
-              disabled={
-                !accountName ||
-                !isConnected ||
-                !recipientValid ||
-                buyerProblems.length > 0
-              }
-              onPress={() => setStep("review")}
-            />
-          </View>
-        </>
-      )}
-
-      {step === "review" && (
-        <>
-          <View style={styles.reviewHeader}>
-            <Text style={styles.reviewTitle}>Buy {token}</Text>
-            <Text style={styles.reviewSubtitle}>
-              Pay with {currency}, receive {token} in your wallet
-            </Text>
-          </View>
-
-          <View style={styles.reviewCard}>
-            <ReviewRow
-              label="You pay"
-              value={amount ? formatFiat(currency, amount) : `— ${currency}`}
-            />
-            <ReviewRow
-              label="You receive"
-              value={estimate ? `≈ ${estimate} ${token}` : `— ${token}`}
-              accentLabel
-            />
-            <ReviewRow
-              label="On"
-              value={getChain(chain)?.name ?? chain}
-              icon={<ChainLogo id={chain} size={18} />}
-            />
-            <CopyableShort
-              label="Wallet"
-              value={recipient}
-              display={
-                recipient
-                  ? `${recipient.slice(0, 6)}…${recipient.slice(-4)}`
-                  : ""
-              }
-            />
-            <ReviewRow label="Refund to" value={accountName ?? ""} />
-          </View>
-
-          <Text style={styles.lockNote}>
-            <Text style={styles.lockNoteStrong}>Final rate</Text> locks when you
-            create the order.
-          </Text>
-
-          <Primary label="Create order" onPress={() => void createOrder()} />
-          {onramp.error && <Text style={f.error}>{onramp.error}</Text>}
-          <Secondary label="Back" onPress={() => setStep("recipient")} />
-        </>
-      )}
-    </ScrollView>
-  );
-}
-
-/** Review-card row: muted label (coral when highlighted) + bold right value,
- *  with an optional leading logo — matches the airier confirm-screen layout. */
-function ReviewRow({
-  label,
-  value,
-  accentLabel,
-  icon,
-}: {
-  label: string;
-  value: string;
-  accentLabel?: boolean;
-  icon?: ViewProps["children"];
-}) {
-  return (
-    <View style={styles.reviewRow}>
-      <Text
-        style={[
-          styles.reviewRowLabel,
-          accentLabel && styles.reviewRowLabelAccent,
-        ]}
-      >
-        {label}
-      </Text>
-      <View style={styles.reviewRowRight}>
-        {icon}
-        <Text style={styles.reviewRowValue}>{value}</Text>
-      </View>
-    </View>
-  );
-}
-
-/** Truncated value that matches Row layout; tap copies the full `value`. */
-function CopyableShort({
-  label,
-  value,
-  display,
-}: {
-  label: string;
-  value: string;
-  display: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  if (!value) return <Row l={label} r="" />;
-  const copy = async () => {
-    if (await copyToClipboard(value)) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    }
-  };
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.copyableShort,
-        pressed && styles.copyRowPressed,
-      ]}
-      onPress={() => void copy()}
-      accessibilityRole="button"
-      accessibilityHint="Copies the full wallet address"
-    >
-      <Text style={styles.copyableShortLabel}>{label}</Text>
-      <View style={styles.copyableShortRight}>
-        <Text style={styles.copyableShortValue}>
-          {copied ? "Copied" : display}
-        </Text>
-        <Feather
-          name={copied ? "check" : "copy"}
-          size={14}
-          color={copied ? theme.colors.ok : theme.colors.muted}
-        />
-      </View>
-    </Pressable>
-  );
-}
-
-// One tappable field that copies its value to the clipboard. If the native
-// clipboard module isn't in this build, it stays a plain (non-copy) row.
-function CopyRow({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    if (await copyToClipboard(value)) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    }
-  };
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.copyRow,
-        pressed && styles.copyRowPressed,
-      ]}
-      onPress={() => void copy()}
-    >
-      <View style={styles.copyMain}>
-        <Text style={styles.copyLabel}>{label}</Text>
-        <Text style={styles.copyValue} selectable>
-          {value}
-        </Text>
-      </View>
-      <Feather
-        name={copied ? "check" : "copy"}
-        size={16}
-        color={copied ? theme.colors.ok : theme.colors.muted}
+          </>
+        }
       />
-    </Pressable>
+
+      <RateLine rate={rate ? { from: `1 ${token}`, to: `${rate.toLocaleString("en-US")} ${currency}` } : null} />
+
+      <AmountCard
+        label="You receive"
+        readOnly
+        prefix="≈"
+        value={estimate !== null ? estimate.toLocaleString("en-US", { maximumFractionDigits: 2 }) : ""}
+        pill={chainPicker}
+      />
+
+      {estimate !== null ? (
+        <Text style={kitStyles.small}>Estimate · final rate locks when you create the order</Text>
+      ) : null}
+
+      <PrimaryButton
+        label={amountNum > 0 ? "Continue" : "Enter an amount"}
+        disabled={!(amountNum > 0)}
+        arrow
+        onPress={() => setStep("review")}
+      />
+    </FlowScreen>
   );
 }
 
-function OnrampStatus({
+/* ── 3. Pay: order status ───────────────────────────────────────────────── */
+
+function BuyOrder({
   onramp,
   token,
   chain,
+  currency,
   recipient,
+  typedAmount,
+  todaysRate,
   onNewOrder,
+  onNewDetails,
 }: {
   onramp: ReturnType<typeof usePaycrestOnramp>;
   token: PaycrestToken;
   chain: ChainId;
+  currency: PaycrestFiat;
   recipient: string;
+  typedAmount: number;
+  todaysRate: number | null;
   onNewOrder: () => void;
+  onNewDetails: () => void;
 }) {
   const { status, order, error, depositSent, markSent } = onramp;
 
-  // --- Success: the hero moment, with delivery details --------------------
-  if (status === "complete") {
-    return (
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.content}
-      >
-        <View style={styles.successCard}>
-          <Confetti />
-          <SuccessCheck />
-          <Text style={styles.successEyebrow}>Transfer complete</Text>
-          <Text style={styles.successAmount}>
-            {order?.amount ?? ""} {token}
-          </Text>
-          <View style={styles.receivedBox}>
-            <Text style={styles.receivedLabel}>RECEIVED AT</Text>
-            <Text style={styles.receivedAddr} selectable>
-              {recipient}
-            </Text>
-            <Text style={styles.receivedSub}>
-              {token} on {getChain(chain)?.name ?? chain}
-            </Text>
-          </View>
-          {order?.txHash && (
-            <Text style={styles.txHash}>
-              Tx {order.txHash.slice(0, 10)}…{order.txHash.slice(-8)}
-            </Text>
-          )}
-        </View>
-        <Primary label="New order" onPress={onNewOrder} />
-      </ScrollView>
-    );
-  }
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (status !== "awaiting_deposit") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [status]);
 
-  // --- Awaiting deposit: details first, then confirm ----------------------
-  if (status === "awaiting_deposit" && order) {
-    return (
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.content}
-      >
-        <Text style={f.title}>Send your payment</Text>
-        <Text style={f.estimate}>
-          Transfer exactly this amount to the account below — tap any field to
-          copy it. Your {token} arrives once we confirm the payment.
-        </Text>
-        <View style={styles.copyCard}>
-          <CopyRow
-            label="Amount"
-            value={
-              order.depositCurrency
-                ? formatFiat(
-                    order.depositCurrency,
-                    order.amountToTransfer ?? ""
-                  )
-                : String(order.amountToTransfer ?? "")
-            }
-          />
-          <CopyRow
-            label="Account number"
-            value={order.depositAccountIdentifier ?? ""}
-          />
-          {order.depositAccountName && (
-            <CopyRow label="Account name" value={order.depositAccountName} />
-          )}
-          {order.depositInstitution && (
-            <CopyRow label="Bank / provider" value={order.depositInstitution} />
-          )}
-        </View>
+  const chainName = getChain(chain)?.name ?? chain;
+  const payCurrency = order?.depositCurrency ?? currency;
+  const payLabel = order?.amountToTransfer ? formatFiat(payCurrency, order.amountToTransfer) : "—";
+  const receiveLabel = order ? formatToken(Number(order.amount), token, 2) : "—";
+  const deadline = order?.validUntil ?? null;
+  const left = deadline ? Date.parse(deadline) - now : NaN;
+  const countdown = Number.isFinite(left) && left > 0 ? formatCountdown(left) : null;
+  const expiringSoon = Number.isFinite(left) && left > 0 && left < 5 * 60 * 1000;
+  const to = order?.recipientAddress ?? recipient;
 
-        {depositSent ? (
-          <>
-            <ActivityIndicator color={theme.colors.accent} style={styles.pad} />
-            <Text style={f.estimate}>
-              Confirming your payment — this can take a few minutes.
-            </Text>
-          </>
-        ) : (
-          <>
-            <Primary label="I've sent the payment" onPress={markSent} />
-            <Text style={f.estimate}>
-              We&apos;ll only start checking once you&apos;ve paid — no need to
-              keep this screen open the whole time.
-            </Text>
-          </>
-        )}
-        {error && <Text style={f.error}>{error}</Text>}
-      </ScrollView>
-    );
-  }
+  const expired =
+    !!order &&
+    !paycrestOnrampPaid(order) &&
+    (order.status === "expired" || (status === "error" && /expired/i.test(error ?? "")));
 
-  // --- Creating: centered spinner while the order is being placed ----------
   if (status === "creating") {
     return (
-      <View style={styles.centeredPhase}>
-        <View style={styles.phaseIconRing}>
-          <ActivityIndicator size="large" color={theme.colors.accent} />
+      <FlowScreen>
+        <StepProgress steps={STEPS} current={2} />
+        <View style={st.center}>
+          <ActivityIndicator size="large" color={c.ink} />
+          <Text style={kitStyles.cardTitle}>Setting up your order…</Text>
+          <Text style={kitStyles.small}>Locking your rate and opening an account for your payment.</Text>
         </View>
-        <Text style={styles.phaseTitle}>Creating order</Text>
-        <Text style={styles.phaseSub}>
-          Locking your rate and setting up payment details…
-        </Text>
-      </View>
+      </FlowScreen>
     );
   }
 
-  // --- Settling ------------------------------------------------------------
-  if (status === "settling") {
+  if (expired && order) {
+    const estimate = todaysRate && typedAmount > 0 ? typedAmount / todaysRate : null;
     return (
-      <View style={styles.centeredPhase}>
-        <View style={styles.phaseIconRing}>
-          <ActivityIndicator size="large" color={theme.colors.accent} />
-        </View>
-        <Text style={styles.phaseTitle}>Delivering your {token}</Text>
-        <Text style={styles.phaseSub}>
-          Payment confirmed — sending {token} to your wallet.
-        </Text>
-      </View>
+      <FlowScreen>
+        <ExpiredOrder
+          steps={STEPS}
+          deadline={deadline}
+          createdAt={order.createdAt}
+          againTitle="Buy again at today's rate"
+          againSub="Same amount, wallet and bank details. You'll get new payment details and a fresh time limit."
+          payLabel="You pay"
+          payAmount={typedAmount > 0 ? formatFiat(currency, typedAmount) : payLabel}
+          receiveLabel="You receive about"
+          receiveAmount={estimate !== null ? formatToken(estimate, token, 2) : null}
+          rateLine={todaysRate ? `1 ${token} ≈ ${todaysRate.toLocaleString("en-US")} ${currency}` : null}
+          primaryLabel="Get new payment details"
+          onPrimary={onNewDetails}
+          secondaryLabel="Change amount"
+          onSecondary={onNewOrder}
+          quoteRows={[
+            ...(order.amountToTransfer ? [{ label: "You were paying", value: payLabel }] : []),
+            ...(order.rate ? [{ label: "Rate", value: `1 ${token} = ${Number(order.rate).toLocaleString("en-US")} ${currency}` }] : []),
+            { label: "You'd have received", value: receiveLabel },
+            ...(to ? [{ label: "To", value: `${short0x(to)} · ${chainName}` }] : []),
+          ]}
+          orderId={order.id}
+        />
+      </FlowScreen>
     );
   }
 
-  // --- Error ---------------------------------------------------------------
+  if (status === "complete") {
+    return (
+      <FlowScreen>
+        <StepProgress steps={STEPS} current={3} />
+        <Card style={{ alignItems: "center", overflow: "hidden" }}>
+          <Confetti />
+          <SuccessCheck />
+          <Text style={st.doneAmount}>{receiveLabel}</Text>
+          <Text style={[kitStyles.small, { textAlign: "center" }]}>
+            {to ? `in your wallet ${short0x(to)} on ${chainName}` : `on ${chainName}`}
+          </Text>
+          {order ? <Text style={st.orderId} selectable>Order {order.id}</Text> : null}
+        </Card>
+        <PrimaryButton label="Buy again" onPress={onNewOrder} arrow />
+      </FlowScreen>
+    );
+  }
+
+  if (status === "error" && !order) {
+    return (
+      <FlowScreen>
+        <StepProgress steps={STEPS} current={2} />
+        <FlowHeader title="Couldn't create this order" />
+        <Notice tone="error">{error ?? "Please try again."}</Notice>
+        <PrimaryButton label="Try again" onPress={onNewOrder} />
+      </FlowScreen>
+    );
+  }
+
+  const waiting = status === "awaiting_deposit";
+  const stages = [
+    { l: "Rate locked", d: "We've opened an account for your payment." },
+    { l: "Waiting for your payment", d: "This page updates on its own when it arrives." },
+    { l: `Sending your ${token}`, d: "Starts once your payment is confirmed." },
+    { l: `You receive ${token}`, d: `In your wallet on ${chainName}.` },
+  ];
+
   return (
-    <View style={styles.centeredPhase}>
-      <View style={[styles.phaseIconRing, styles.phaseIconError]}>
-        <Feather name="alert-circle" size={28} color={theme.colors.err} />
-      </View>
-      <Text style={styles.phaseTitle}>Something went wrong</Text>
-      <Text style={styles.phaseError}>
-        {error ?? "We couldn't create this order. Please try again."}
-      </Text>
-      <View style={styles.phaseActions}>
-        <Primary label="Try again" onPress={onNewOrder} />
-      </View>
-    </View>
+    <FlowScreen>
+      <StepProgress steps={STEPS} current={2} />
+      <FlowHeader
+        title={waiting ? `Pay ${payLabel} to finish` : `Payment received — sending your ${token}`}
+        subtitle={waiting ? `You get ${receiveLabel} on ${chainName} once it arrives.` : undefined}
+      />
+      {waiting && countdown ? (
+        <View style={[st.timer, expiringSoon && st.timerSoon]}>
+          <Feather name="clock" size={15} color={expiringSoon ? c.danger : c.warnStrong} />
+          <Text style={[st.timerText, expiringSoon && { color: c.danger }]}>
+            {countdown} left{deadline ? ` · pay by ${clockTime(deadline)}` : ""}
+          </Text>
+        </View>
+      ) : null}
+      {error ? <Notice tone="error">{error}</Notice> : null}
+
+      {waiting && order?.depositAccountIdentifier ? (
+        <Card primary>
+          <Text style={kitStyles.cardTitle}>Pay into this account</Text>
+          <Text style={kitStyles.small}>Send the exact amount in one transfer from your bank app.</Text>
+          <CopyRow label="Amount" value={payLabel} copyText={String(order.amountToTransfer ?? "")} />
+          <CopyRow
+            label="Account number"
+            value={order.depositAccountIdentifier}
+            copyText={order.depositAccountIdentifier}
+            mono
+          />
+          <DetailRows
+            rows={[
+              ...(order.depositInstitution ? [{ label: "Bank", value: order.depositInstitution }] : []),
+              ...(order.depositAccountName ? [{ label: "Account name", value: order.depositAccountName }] : []),
+            ]}
+          />
+          {depositSent ? (
+            <View style={st.checking}>
+              <ActivityIndicator size="small" color={c.muted} />
+              <Text style={kitStyles.small}>Confirming your payment — this can take a few minutes.</Text>
+            </View>
+          ) : (
+            <SecondaryButton label="I've sent the payment" onPress={markSent} />
+          )}
+        </Card>
+      ) : null}
+
+      {order ? (
+        <Card>
+          <View style={st.cardHead}>
+            <Text style={kitStyles.cardTitle}>Locked quote</Text>
+            <View style={st.locked}>
+              <Feather name="check" size={13} color={c.success} />
+              <Text style={st.lockedText}>Rate locked</Text>
+            </View>
+          </View>
+          <DetailRows
+            rows={[
+              { label: "You pay", value: payLabel },
+              ...(order.rate ? [{ label: "Rate", value: `1 ${token} = ${Number(order.rate).toLocaleString("en-US")} ${currency}` }] : []),
+              { label: "You receive", value: receiveLabel },
+              ...(to ? [{ label: "To", value: `${short0x(to)} on ${chainName}` }] : []),
+            ]}
+          />
+        </Card>
+      ) : null}
+
+      <Card>
+        <Text style={kitStyles.cardTitle}>Progress</Text>
+        <ProgressList stages={stages} activeIndex={waiting ? 1 : 2} failed={status === "error"} />
+        {order ? <Text style={st.orderId} selectable>Order {order.id}</Text> : null}
+      </Card>
+
+      {status === "error" ? <SecondaryButton label="Back to Buy" onPress={onNewOrder} /> : null}
+    </FlowScreen>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.colors.bg },
-  content: { padding: theme.spacing(2), gap: theme.spacing(1.5) },
-  accountName: { color: theme.colors.ok, fontSize: 15, fontWeight: "600" },
-  inputError: { borderColor: theme.colors.err },
-  useConnected: {
-    color: theme.colors.accent,
-    fontSize: 13,
-    fontWeight: "600",
-    marginTop: theme.spacing(0.75),
-  },
-  pad: { paddingVertical: theme.spacing(2) },
+/** 2_940_000 ms → "49:00". */
+function formatCountdown(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
 
-  // Centered creating / settling / error phases
-  centeredPhase: {
-    flex: 1,
-    backgroundColor: theme.colors.bg,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: theme.spacing(3),
-    gap: theme.spacing(1.25),
-  },
-  phaseIconRing: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: theme.colors.surface,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: theme.spacing(1),
-  },
-  phaseIconError: {
-    backgroundColor: "#FDF2F0",
-    borderColor: "#F5C4BC",
-  },
-  phaseTitle: {
-    color: theme.colors.text,
-    fontFamily: theme.serif,
-    fontSize: 28,
-    lineHeight: 34,
-    textAlign: "center",
-  },
-  phaseSub: {
-    color: theme.colors.muted,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    maxWidth: 280,
-  },
-  phaseError: {
-    color: theme.colors.err,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    maxWidth: 300,
-  },
-  phaseActions: {
-    alignSelf: "stretch",
-    marginTop: theme.spacing(2),
-  },
-
-  // Confirm screen — centered header over the summary card
-  reviewHeader: {
-    alignItems: "center",
-    gap: theme.spacing(0.5),
-    marginBottom: theme.spacing(0.5),
-  },
-  reviewTitle: {
-    color: theme.colors.text,
-    fontFamily: theme.serif,
-    fontSize: 38,
-    lineHeight: 42,
-    textAlign: "center",
-  },
-  reviewSubtitle: {
-    color: theme.colors.muted,
-    fontSize: 15,
-    lineHeight: 21,
-    textAlign: "center",
-  },
-  reviewCard: {
-    padding: theme.spacing(2.5),
-    borderRadius: theme.radius.cardLg,
-    backgroundColor: theme.colors.surface,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    gap: theme.spacing(1.75),
-    ...theme.shadow,
-  },
-  reviewRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: theme.spacing(2),
-  },
-  reviewRowLabel: { color: theme.colors.muted, fontSize: 15 },
-  reviewRowLabelAccent: { color: theme.colors.accent, fontWeight: "600" },
-  reviewRowRight: {
+const st = StyleSheet.create({
+  legs: { flexDirection: "row", alignItems: "center", gap: z(12) },
+  legAmount: { color: c.ink, fontSize: zf(18), fontWeight: "600" },
+  editRow: { flexDirection: "row", alignItems: "center", gap: z(12), borderTopWidth: 1, borderTopColor: c.edgeSoft, paddingTop: z(12) },
+  divider: { height: z(1), backgroundColor: c.edgeSoft },
+  sectionTitle: { color: c.ink, fontSize: zf(15), fontWeight: "600" },
+  err: { color: c.danger, fontSize: zf(13) },
+  center: { alignItems: "center", gap: z(10), paddingVertical: z(48) },
+  doneAmount: { color: c.ink, fontSize: zf(30), fontWeight: "600", marginTop: z(8) },
+  orderId: { color: c.muted, fontSize: zf(12), fontFamily: "Menlo" },
+  timer: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    flexShrink: 1,
+    gap: z(8),
+    alignSelf: "flex-start",
+    height: z(36),
+    paddingHorizontal: z(14),
+    borderRadius: z(999),
+    backgroundColor: c.warnBg,
   },
-  reviewRowValue: {
-    color: theme.colors.text,
-    fontSize: 15,
-    fontWeight: "600",
-    flexShrink: 1,
-    textAlign: "right",
-  },
-  lockNote: {
-    color: theme.colors.muted,
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: theme.spacing(0.25),
-  },
-  lockNoteStrong: { color: theme.colors.textSoft, fontWeight: "600" },
-
-  // Truncated row that copies the full value on tap (same footprint as Row)
-  copyableShort: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: theme.spacing(2),
-    borderRadius: 6,
-    marginHorizontal: -4,
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-  },
-  copyableShortLabel: { color: theme.colors.muted, fontSize: 15 },
-  copyableShortRight: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    flexShrink: 1,
-  },
-  copyableShortValue: {
-    color: theme.colors.text,
-    fontSize: 15,
-    fontWeight: "600",
-    flexShrink: 1,
-    textAlign: "right",
-  },
-
-  // Copyable deposit fields
-  copyCard: {
-    borderRadius: theme.radius.card,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-    overflow: "hidden",
-  },
-  copyRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: theme.spacing(2),
-    paddingVertical: theme.spacing(1.75),
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border,
-  },
-  copyRowPressed: { backgroundColor: theme.colors.bgSoft },
-  copyMain: { flex: 1, gap: 3, marginRight: theme.spacing(1.5) },
-  copyLabel: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    textTransform: "uppercase",
-    letterSpacing: 0.4,
-  },
-  copyValue: { color: theme.colors.text, fontSize: 17, fontWeight: "600" },
-
-  // Success card
-  successCard: {
-    position: "relative",
-    overflow: "hidden",
-    alignItems: "center",
-    borderRadius: theme.radius.cardLg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-    paddingHorizontal: theme.spacing(3),
-    paddingTop: theme.spacing(3.5),
-    paddingBottom: theme.spacing(3),
-    gap: theme.spacing(0.75),
-    ...theme.shadow,
-  },
-  successEyebrow: {
-    color: theme.colors.ok,
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginTop: theme.spacing(1.5),
-  },
-  successAmount: {
-    color: theme.colors.text,
-    fontFamily: theme.serif,
-    fontSize: 40,
-    lineHeight: 46,
-  },
-  receivedBox: {
-    alignSelf: "stretch",
-    marginTop: theme.spacing(1.5),
-    borderRadius: theme.radius.input,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.bg,
-    padding: theme.spacing(1.75),
-    gap: 4,
-  },
-  receivedLabel: {
-    color: theme.colors.muted,
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.5,
-  },
-  receivedAddr: { color: theme.colors.text, fontSize: 13, lineHeight: 19 },
-  receivedSub: { color: theme.colors.muted, fontSize: 12 },
-  txHash: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    marginTop: theme.spacing(0.5),
-  },
+  timerSoon: { backgroundColor: "#FDE8E6" },
+  timerText: { color: c.warnStrong, fontSize: zf(14), fontWeight: "600" },
+  checking: { flexDirection: "row", alignItems: "center", gap: z(8) },
+  cardHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  locked: { flexDirection: "row", alignItems: "center", gap: z(4) },
+  lockedText: { color: c.success, fontSize: zf(13), fontWeight: "500" },
 });

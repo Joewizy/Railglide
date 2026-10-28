@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
+  Linking,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
@@ -22,6 +23,7 @@ import { sendChat } from "@/api/chat";
 import { ApiError } from "@/api/client";
 import { useSession } from "@/store/session";
 import { theme } from "@/theme";
+import { SUPPORT_EMAIL, SUPPORT_EMAIL_URL } from "@/config/support";
 import type { RootTabParamList } from "@/navigation/RootNavigator";
 
 const FLOW_CTA: Record<FlowId, string> = {
@@ -147,6 +149,14 @@ export function IntentScreen() {
                   </Pressable>
                 ))}
               </View>
+              {/* How to reach us */}
+              <Text style={styles.contact}>
+                Need help? Email{" "}
+                <Text style={styles.contactLink} onPress={() => void Linking.openURL(SUPPORT_EMAIL_URL)}>
+                  {SUPPORT_EMAIL}
+                </Text>
+                .
+              </Text>
             </View>
           )}
 
@@ -388,4 +398,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   sendButtonDisabled: { opacity: 0.4 },
+  contact: { color: theme.colors.muted, fontSize: 13, lineHeight: 19, marginTop: theme.spacing(2) },
+  contactLink: { color: theme.colors.text, fontWeight: "600" },
 });

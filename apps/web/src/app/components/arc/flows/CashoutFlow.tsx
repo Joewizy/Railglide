@@ -88,7 +88,6 @@ import {
   Notice,
   PrimaryButton,
   RateLine,
-  Reassurance,
   StepProgress,
   SummaryRows,
   TokenChainPill,
@@ -162,6 +161,18 @@ export function CashoutFlow({
 
   // "Recipient gets paid in": Paycrest currencies use this form; "cr:MW"
   // style values (More countries) switch to the ChainRails panel.
+  // A partner currency handed over from chat, picked once the list loads.
+  const [pendingCurrency, setPendingCurrency] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingCurrency || !sellCountries.length) return;
+    const c = sellCountries.find((x) => x.currency.code === pendingCurrency);
+    if (c && CHAINRAILS_OFFRAMP_ENABLED) {
+      setCurrency(c.currency.code);
+      setPayCountry(c.countryCode);
+    }
+    setPendingCurrency(null);
+  }, [pendingCurrency, sellCountries]);
+
   const choosePayCurrency = (value: string) => {
     if (!value.startsWith("cr:")) {
       setCurrency(value);
@@ -340,7 +351,12 @@ export function CashoutFlow({
     const launch = pendingLaunchRef.current;
     if (!launch || launch.flow !== "cashout") return;
     if (launch.amount) setAmount(launch.amount);
-    if (launch.currency) setCurrency(launch.currency);
+    if (launch.currency) {
+      const code = launch.currency.toUpperCase();
+      // A partner currency (e.g. GHS from chat) waits for the country list.
+      if (isPaycrestFiat(code)) setCurrency(code);
+      else setPendingCurrency(code);
+    }
     if (launch.token === "USDC" || launch.token === "USDT") {
       setToken(launch.token);
     }
@@ -717,9 +733,6 @@ export function CashoutFlow({
           "Enter an amount"
         )}
       </PrimaryButton>
-      <Reassurance>
-        You&apos;ll review everything before anything leaves your wallet.
-      </Reassurance>
     </FlowPage>
   );
 }

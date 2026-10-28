@@ -53,7 +53,6 @@ import {
   Notice,
   PrimaryButton,
   RateLine,
-  Reassurance,
   StepProgress,
   TokenChainPill,
 } from "../ui/sendKit";
@@ -173,6 +172,19 @@ export function BuyFlow({
 
   // A row picked in the currency picker. Paycrest currencies keep this form;
   // any other country goes through ChainRails (USDC only).
+  // A partner currency handed over from chat, picked once the list loads.
+  const [pendingCurrency, setPendingCurrency] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingCurrency || !buyCountries.length) return;
+    const c = buyCountries.find((x) => x.currency.code === pendingCurrency);
+    if (c) {
+      setCurrency(c.currency.code);
+      setPayCountry(c.countryCode);
+      setToken("USDC");
+    }
+    setPendingCurrency(null);
+  }, [pendingCurrency, buyCountries]);
+
   const chooseCountry = (o: CountryOption) => {
     if (!o.value.startsWith("cr:")) {
       choosePayCurrency(o.value);
@@ -268,7 +280,14 @@ export function BuyFlow({
     const launch = loadPendingLaunch();
     if (!launch || launch.flow !== "buy") return;
     if (launch.amount) setAmount(launch.amount);
-    if (launch.currency) restoreCurrency(launch.currency);
+    if (launch.currency) {
+      const code = launch.currency.toUpperCase();
+      // Main or pinned currencies restore straight away; any other partner
+      // currency (e.g. GBP from chat) waits for the country list below.
+      if (isPaycrestFiat(code) || CHAINRAILS_EXTRA_FIAT.some((f) => f.code === code))
+        restoreCurrency(code);
+      else setPendingCurrency(code);
+    }
     if (launch.token === "USDC" || launch.token === "USDT") {
       setToken(launch.token);
     }
@@ -612,9 +631,6 @@ export function BuyFlow({
           "Enter an amount"
         )}
       </PrimaryButton>
-      <Reassurance>
-        You&apos;ll see the exact amount to pay before anything is charged.
-      </Reassurance>
     </FlowPage>
   );
 }

@@ -161,8 +161,6 @@ export function HistoryScreen() {
         </Pressable>
       </View>
 
-      <RampSection orders={rampOrders} onOpen={openRampOrder} />
-
       {ordersQuery.isLoading && (
         <ActivityIndicator color={theme.colors.accent} style={styles.pad} />
       )}
@@ -177,14 +175,60 @@ export function HistoryScreen() {
         <Text style={styles.muted}>No orders yet.</Text>
       )}
 
-      {ordersQuery.data?.orders.map((o) => (
-        <OrderRow key={o.id} order={o} onPress={() => openOrder(o)} />
-      ))}
+      {/* One list, newest first, whichever provider ran the order. */}
+      {[
+        ...(ordersQuery.data?.orders ?? []).map((o) => ({
+          kind: "paycrest" as const,
+          at: o.createdAt ? Date.parse(o.createdAt) : 0,
+          o,
+        })),
+        ...rampOrders.map((r) => ({ kind: "ramp" as const, at: r.createdAt, r })),
+      ]
+        .sort((a, b) => b.at - a.at)
+        .map((item) =>
+          item.kind === "paycrest" ? (
+            <OrderRow key={item.o.id} order={item.o} onPress={() => openOrder(item.o)} />
+          ) : (
+            <RampSection key={`cr-${item.r.id}`} orders={[item.r]} onOpen={openRampOrder} />
+          )
+        )}
 
       <OrderDetailModal order={selected} onClose={() => setSelected(null)} />
     </ScrollView>
   );
 }
+
+/** Plain status for a Paycrest order. A new Buy is already "pending" while it
+ *  waits for the transfer, so the backend's awaitingPayment flag decides that. */
+function paycrestLabel(o: HistoryOrder): string {
+  if (o.awaitingPayment) return "Waiting for payment";
+  switch (o.status) {
+    case "settled":
+    case "fulfilled":
+      return "Paid";
+    case "expired":
+      return "Expired";
+    case "refunded":
+      return "Refunded";
+    case "validated":
+    case "processing":
+    case "settling":
+      return "Processing";
+    case "pending":
+      return o.direction === "onramp" ? "Processing" : "Confirming";
+    default:
+      return "Awaiting funds";
+  }
+}
+
+const RAMP_LABEL: Record<string, string> = {
+  pending: "Waiting for payment",
+  processing: "Processing",
+  completed: "Completed",
+  expired: "Expired",
+  failed: "Failed",
+  unknown: "In progress",
+};
 
 // Finished orders have nothing left to do — everything else can be reopened in
 // its flow screen to finish paying / funding.
@@ -218,7 +262,7 @@ function RampSection({
                 {verb} · {o.cryptoLabel}
               </Text>
               <View style={styles.cardTopRight}>
-                <Text style={styles.status}>{phase}</Text>
+                <Text style={styles.status}>{RAMP_LABEL[phase] ?? phase}</Text>
                 <Feather
                   name="chevron-right"
                   size={16}
@@ -258,7 +302,7 @@ function OrderRow({
           {verb} · {order.amount} {order.token}
         </Text>
         <View style={styles.cardTopRight}>
-          <Text style={styles.status}>{order.status}</Text>
+          <Text style={styles.status}>{paycrestLabel(order)}</Text>
           <Feather name="chevron-right" size={16} color={theme.colors.faint} />
         </View>
       </View>

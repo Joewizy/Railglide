@@ -84,6 +84,7 @@ export interface RampOrder {
   recipientAddress?: string;
   widgetUrl?: string;
   expiresAt?: string;
+  createdAt?: string;
   providerTxHash?: string | null;
   intentAddress?: string;
   grossDepositAmount?: number;

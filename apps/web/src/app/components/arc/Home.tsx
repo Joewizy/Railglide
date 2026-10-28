@@ -13,12 +13,7 @@
  */
 
 import React from "react";
-import {
-  SUPPORT_EMAIL,
-  SUPPORT_EMAIL_URL,
-  SUPPORT_TELEGRAM,
-  SUPPORT_TELEGRAM_URL,
-} from "@/config/support";
+import { SUPPORT_EMAIL, SUPPORT_EMAIL_URL } from "@/config/support";
 import { Icon } from "./icons";
 import type { FlowId } from "@/assistant/types";
 
@@ -212,17 +207,8 @@ export function Home({
         Need help? Email{" "}
         <a href={SUPPORT_EMAIL_URL} style={{ color: "var(--fg)", fontWeight: 500 }}>
           {SUPPORT_EMAIL}
-        </a>{" "}
-        or message{" "}
-        <a
-          href={SUPPORT_TELEGRAM_URL}
-          target="_blank"
-          rel="noreferrer"
-          style={{ color: "var(--fg)", fontWeight: 500 }}
-        >
-          @{SUPPORT_TELEGRAM}
-        </a>{" "}
-        on Telegram.
+        </a>
+        .
       </p>
     </div>
   );

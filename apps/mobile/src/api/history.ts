@@ -19,6 +19,8 @@ export interface HistoryOrder {
   accountIdentifier: string | null;
   txHash: string | null;
   createdAt: string | null;
+  /** Buy only: open and still waiting for the bank transfer (set by the backend). */
+  awaitingPayment?: boolean;
 }
 
 export interface OrdersResponse {

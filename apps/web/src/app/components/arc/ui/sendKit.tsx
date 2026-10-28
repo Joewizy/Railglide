@@ -490,16 +490,6 @@ export function PrimaryButton({
   );
 }
 
-/** Small reassurance line under the button (shield icon). */
-export function Reassurance({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[13px] text-muted">
-      <ShieldIcon />
-      {children}
-    </p>
-  );
-}
-
 /**
  * Inline notice. "warning" is the amber box (zero balance); "info" is the blue
  * box (ChainRails identity check); "error" is red text.

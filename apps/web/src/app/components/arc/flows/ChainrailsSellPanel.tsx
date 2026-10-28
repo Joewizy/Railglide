@@ -47,7 +47,6 @@ import {
   Notice,
   PrimaryButton,
   RateLine,
-  Reassurance,
 } from "../ui/sendKit";
 import { CurrencyPicker, type CountryOption } from "../ui/sendPickers";
 import { ExpiredOrder } from "../ui/ExpiredOrder";
@@ -1614,12 +1613,6 @@ export function ChainrailsSellPanel({
                 </>
               )}
             </button>
-            <span
-              className="muted"
-              style={{ fontSize: 11.5, textAlign: "center" }}
-            >
-              We&apos;ll confirm your recipient details before any funds move.
-            </span>
             <button className="btn btn-quiet" onClick={() => setQuote(null)}>
               Edit
             </button>
@@ -1775,9 +1768,6 @@ export function ChainrailsSellPanel({
           </>
         )}
       </PrimaryButton>
-      <Reassurance>
-        You&apos;ll review everything before anything leaves your wallet.
-      </Reassurance>
     </div>
   );
 }

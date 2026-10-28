@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pressable, Switch, Text, TextInput, View, StyleSheet } from "react-native";
+import { Pressable, Switch, Text, View, StyleSheet } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import {
   BUYER_ID_TYPES,
@@ -13,6 +13,7 @@ import {
   type BuyerIdType,
 } from "@railglide/shared/kyc";
 import { Field, formStyles as f } from "@/components/form";
+import { TextField } from "@/components/kit";
 import { Picker } from "@/components/Picker";
 import { theme } from "@/theme";
 
@@ -101,27 +102,23 @@ export function BuyerDetailsFields({
       <Text style={f.estimate}>{buyerDetailsNote(currency)}</Text>
 
       <Field label="Date of birth">
-        <TextInput
-          style={f.input}
+        <TextField
           value={value.birthDate}
           onChangeText={(t) => set({ birthDate: formatDate(t) })}
           keyboardType="number-pad"
           placeholder="YYYY-MM-DD"
-          placeholderTextColor={theme.colors.muted}
         />
       </Field>
 
       {isNigeria ? (
         <>
           <Field label="NIN">
-            <TextInput
-              style={f.input}
+            <TextField
               value={value.nin ?? ""}
               onChangeText={(t) => set({ nin: t })}
               keyboardType="number-pad"
               maxLength={13}
               placeholder="11-digit National Identification Number"
-              placeholderTextColor={theme.colors.muted}
             />
             <ElevenDigitHint value={value.nin} name="NIN" />
           </Field>
@@ -138,14 +135,12 @@ export function BuyerDetailsFields({
             />
           </Field>
           <Field label="ID number">
-            <TextInput
-              style={f.input}
+            <TextField
               value={value.idNumber ?? ""}
               onChangeText={(t) => set({ idNumber: t })}
               autoCapitalize="characters"
               autoCorrect={false}
               placeholder="As shown on your ID"
-              placeholderTextColor={theme.colors.muted}
             />
           </Field>
           {isXof && (
@@ -167,13 +162,11 @@ export function BuyerDetailsFields({
 
       {isKenya && (
         <Field label="M-Pesa phone number">
-          <TextInput
-            style={f.input}
+          <TextField
             value={value.phone ?? ""}
             onChangeText={(t) => set({ phone: t })}
             keyboardType="phone-pad"
             placeholder="0712 345 678"
-            placeholderTextColor={theme.colors.muted}
           />
         </Field>
       )}
@@ -186,7 +179,7 @@ export function BuyerDetailsFields({
         <Switch
           value={remember}
           onValueChange={onRememberChange}
-          trackColor={{ true: theme.colors.accent }}
+          trackColor={{ true: theme.flow.ink }}
         />
       </View>
     </View>
@@ -195,7 +188,7 @@ export function BuyerDetailsFields({
 
 const styles = StyleSheet.create({
   wrap: { gap: 12 },
-  heading: { color: theme.colors.text, fontSize: 15, fontWeight: "600" },
+  heading: { color: theme.flow.ink, fontSize: 15, fontWeight: "600" },
   rememberRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -207,7 +200,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
-  hide: { color: theme.colors.accent, fontSize: 13, fontWeight: "600" },
+  hide: { color: theme.flow.ink, fontSize: 13, fontWeight: "600", textDecorationLine: "underline" },
   summary: {
     flexDirection: "row",
     alignItems: "center",
@@ -216,6 +209,6 @@ const styles = StyleSheet.create({
   },
   pressed: { opacity: 0.7 },
   rememberText: { flex: 1, gap: 2 },
-  rememberLabel: { color: theme.colors.textSoft, fontSize: 14 },
-  rememberHint: { color: theme.colors.muted, fontSize: 12 },
+  rememberLabel: { color: theme.flow.ink, fontSize: 14 },
+  rememberHint: { color: theme.flow.muted, fontSize: 12 },
 });

@@ -1,15 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  ScrollView,
-  ActivityIndicator,
-  Linking,
-  Pressable,
-  StyleSheet,
-} from "react-native";
-import { Feather } from "@expo/vector-icons";
+import { View, Text, ActivityIndicator, Linking, StyleSheet, type ViewProps } from "react-native";
 import {
   createRampOrder,
   getRampCountries,
@@ -18,7 +8,6 @@ import {
   type RampCountry,
   type RampFieldSpec,
   type RampOrder,
-  type TransferInstructions,
 } from "@/api/chainrails";
 import {
   classifyRampStatus,
@@ -28,21 +17,36 @@ import {
   type RampDestination,
   type RampOrderPhase,
 } from "@/rails/chainrails";
+import { PAYCREST_FIAT, type PaycrestFiat } from "@/rails/paycrest";
 import { ApiError } from "@/api/client";
 import { pollRampOrder } from "@/lib/rampPoll";
 import { useRampOrders } from "@/store/rampOrders";
-import {
-  Field,
-  Intro,
-  PageTitle,
-  Primary,
-  Secondary,
-  formStyles as f,
-} from "@/components/form";
 import { Picker } from "@/components/Picker";
-import { PrefixedAmountInput } from "@/components/PrefixedAmountInput";
 import { Confetti } from "@/components/Confetti";
 import { SuccessCheck } from "@/components/SuccessCheck";
+import { CurrencySheet, type CurrencyOption } from "@/components/flowPickers";
+import { BankAccount } from "@/components/BankAccount";
+import { ExpiredOrder } from "@/components/ExpiredOrder";
+import {
+  AmountCard,
+  Card,
+  CopyRow,
+  CurrencyPill,
+  DetailRows,
+  FieldLabel,
+  FlowHeader,
+  FlowScreen,
+  Notice,
+  PrimaryButton,
+  ProgressList,
+  RateLine,
+  SecondaryButton,
+  StepProgress,
+  TextField,
+  TextLink,
+  kitStyles,
+  short0x,
+} from "@/components/kit";
 import {
   clearChainrailsRampDraft,
   loadChainrailsRampDraft,
@@ -50,8 +54,11 @@ import {
   saveChainrailsRampDraft,
   saveSavedEmail,
 } from "@/lib/composeDraft";
-import { copyToClipboard } from "@/lib/clipboard";
-import { theme } from "@/theme";
+import { flagEmoji, formatToken } from "@/lib/format";
+import { theme, z, zf } from "@/theme";
+
+const c = theme.flow;
+const STEPS = ["Amount", "Review", "Pay"];
 
 /** Loose email check — enough to catch typos before we hit the provider. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -77,9 +84,12 @@ export function ChainrailsBuyFlow({
   destination,
   onBack,
   resumeOrderId,
+  chainPicker,
 }: {
   destination: RampDestination;
   onBack: () => void;
+  /** The Buy screen's token + chain pill, shown in "You receive". */
+  chainPicker?: ViewProps["children"];
   /** When set, load this existing order and show its status (from History). */
   resumeOrderId?: string;
 }) {
@@ -106,6 +116,9 @@ export function ChainrailsBuyFlow({
   // pauses while the app is backgrounded (i.e. while they're paying in Safari)
   // and fires immediately when they return.
   const [polling, setPolling] = useState(false);
+  const [currencyOpen, setCurrencyOpen] = useState(false);
+  // Display name of the chosen refund bank (the order only takes its code).
+  const [refundBankName, setRefundBankName] = useState("");
 
   // Prefill the remembered email so a returning buyer doesn't retype it.
   useEffect(() => {
@@ -377,624 +390,399 @@ export function ChainrailsBuyFlow({
 
   // ----- Order created: checkout + live status ----------------------------
   if (order) {
-    const done = isRampPhaseTerminal(phase);
-    const failed = phase === "expired" || phase === "failed";
     // Prefer the stored record's labels — a resumed order has an empty form.
     const rec = trackedOrders.find((o) => o.id === String(order.id));
-    const symbol = country?.currency.symbol ?? "$";
-    const receiveUsdc = order.cryptoAmount ?? estimateUsdc ?? 0;
-    const receiveLabel = rec?.cryptoLabel
-      ? `≈ ${rec.cryptoLabel}`
-      : `≈ ${receiveUsdc.toLocaleString("en-US", {
-          maximumFractionDigits: 2,
-        })} ${order.cryptoCurrency ?? "USDC"}`;
+    const crypto = order.cryptoCurrency ?? "USDC";
+    const receiveLabel =
+      order.cryptoAmount != null
+        ? formatToken(order.cryptoAmount, crypto, 2)
+        : (rec?.cryptoLabel ?? "—");
     const payLabel =
-      rec?.fiatLabel ??
-      `${symbol}${(Number(amount) || 0).toLocaleString("en-US")}`;
-    return (
-      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-        <PageTitle>Buy</PageTitle>
-        {phase === "completed" ? (
+      order.fiatAmount != null && order.fiatCurrency
+        ? `${order.fiatAmount.toLocaleString("en-US")} ${order.fiatCurrency}`
+        : (rec?.fiatLabel ?? "—");
+    const to = order.recipientAddress ?? rec?.address ?? address;
+    const startAgain = () => {
+      // Same amount, country, address and refund details; a fresh quote.
+      setOrder(null);
+      setPhase("pending");
+      setPolling(false);
+      setError(null);
+    };
+
+    if (phase === "expired") {
+      return (
+        <FlowScreen onBack={onBack}>
+          <ExpiredOrder
+            steps={STEPS}
+            deadline={order.expiresAt ?? null}
+            createdAt={order.createdAt ?? null}
+            againTitle="Buy again"
+            againSub="Same amount, wallet and chain. You'll see today's rate before paying."
+            payLabel="You pay"
+            payAmount={payLabel}
+            receiveLabel="You receive"
+            receiveAmount={crypto}
+            rateLine="Today's amount shows on the next step"
+            primaryLabel="Buy again"
+            onPrimary={startAgain}
+            quoteRows={[
+              { label: "You were paying", value: payLabel },
+              { label: "You'd have received", value: receiveLabel },
+              ...(to ? [{ label: "To", value: `${short0x(to)} · ${destination.label}` }] : []),
+            ]}
+            orderId={String(order.id)}
+          />
+        </FlowScreen>
+      );
+    }
+
+    if (phase === "completed") {
+      return (
+        <FlowScreen onBack={onBack}>
+          <StepProgress steps={STEPS} current={3} />
           <SuccessCard order={order} destination={destination} />
-        ) : failed ? (
-          <View style={styles.centerCard}>
-            <View style={[styles.iconRing, styles.iconRingErr]}>
-              <Feather name="alert-circle" size={26} color={theme.colors.err} />
-            </View>
-            <Text style={styles.centerTitle}>
-              {phase === "expired" ? "Payment window closed" : "Order didn't go through"}
-            </Text>
-            <Text style={styles.centerSub}>
-              If you didn&apos;t pay, nothing was charged — you can start a new
-              order.
-            </Text>
-          </View>
-        ) : phase === "processing" ? (
-          // Payment received — provider is settling/bridging the USDC. No more
-          // checkout; just reassure and let the poller flip us to completed.
-          <View style={styles.centerCard}>
-            <View style={styles.iconRing}>
-              <ActivityIndicator color={theme.colors.accent} />
-            </View>
-            <Text style={styles.centerTitle}>Payment received</Text>
-            <Text style={styles.centerSub}>
-              Delivering your USDC to your wallet on {destination.label}. You can
-              close this — it&apos;ll keep going.
-            </Text>
-          </View>
-        ) : (
-          <>
-            <OrderSummary
-              pay={payLabel}
-              receive={receiveLabel}
-              chain={destination.label}
-              address={order.recipientAddress ?? rec?.address ?? address}
-            />
+          <PrimaryButton label="Buy again" onPress={onBack} arrow />
+        </FlowScreen>
+      );
+    }
 
-            {order.transferInstructions?.accountIdentifier ? (
-              // Bank-transfer provider: the account to pay into is the action.
-              <TransferInstructionsCard
-                info={order.transferInstructions}
-                cryptoCurrency={order.cryptoCurrency ?? "USDC"}
-              />
-            ) : order.widgetUrl ? (
-              <>
-                <Primary
-                  label="Open checkout to pay"
-                  onPress={() => {
-                    setPolling(true);
-                    void Linking.openURL(order.widgetUrl!);
-                  }}
+    const failed = phase === "failed";
+    const processing = phase === "processing";
+    const transfer = order.transferInstructions;
+    const stages = [
+      { l: "Order created", d: "Your quote is locked and the order is set up." },
+      transfer?.accountIdentifier
+        ? { l: "Send the bank transfer", d: "Transfer the exact amount to the account shown." }
+        : { l: "Pay in the checkout", d: "Complete the payment in the provider's secure checkout." },
+      { l: "Confirming payment", d: `We confirm your payment and send your ${crypto}.` },
+      { l: "Received", d: `Delivered to your ${destination.label} wallet.` },
+    ];
+    return (
+      <FlowScreen onBack={onBack}>
+        <StepProgress steps={STEPS} current={2} />
+        <FlowHeader
+          title={
+            failed
+              ? "Order didn't go through"
+              : processing
+                ? `Payment received — sending your ${crypto}`
+                : `Pay ${payLabel} to finish`
+          }
+          subtitle={
+            failed
+              ? "If you didn't pay, nothing was charged. Start a new order."
+              : processing
+                ? `Delivering to your wallet on ${destination.label}. You can close this.`
+                : `You get ${receiveLabel} on ${destination.label} once it clears.`
+          }
+        />
+        {error ? <Notice tone="error">{error}</Notice> : null}
+
+        {!failed && !processing ? (
+          transfer?.accountIdentifier ? (
+            <Card primary>
+              <Text style={kitStyles.cardTitle}>Pay into this account</Text>
+              <Text style={kitStyles.small}>Send the exact amount in one transfer from your bank app.</Text>
+              {transfer.amountToTransfer ? (
+                <CopyRow
+                  label="Amount"
+                  value={`${transfer.amountToTransfer} ${transfer.currency ?? ""}`.trim()}
+                  copyText={transfer.amountToTransfer}
                 />
-                <View style={styles.secureRow}>
-                  <Feather name="lock" size={12} color={theme.colors.muted} />
-                  <Text style={styles.secureText}>Secure checkout</Text>
-                </View>
-              </>
-            ) : (
-              // Order exists but the provider hasn't returned how to pay yet —
-              // we're polling for it (never a dead end).
-              <View style={styles.statusRow}>
-                <ActivityIndicator color={theme.colors.accent} />
-                <Text style={f.estimate}>Getting your payment details…</Text>
-              </View>
-            )}
+              ) : null}
+              <CopyRow
+                label="Account number"
+                value={transfer.accountIdentifier}
+                copyText={transfer.accountIdentifier}
+                mono
+              />
+              <DetailRows
+                rows={[
+                  ...(transfer.institution ? [{ label: "Bank", value: transfer.institution }] : []),
+                  ...(transfer.accountName ? [{ label: "Account name", value: transfer.accountName }] : []),
+                ]}
+              />
+            </Card>
+          ) : order.widgetUrl ? (
+            <Card primary>
+              <Text style={kitStyles.cardTitle}>Pay in the secure checkout</Text>
+              <Text style={kitStyles.small}>It opens in your browser. Come back here when you&apos;re done.</Text>
+              <PrimaryButton
+                label="Open checkout to pay"
+                arrow
+                onPress={() => {
+                  setPolling(true);
+                  void Linking.openURL(order.widgetUrl!);
+                }}
+              />
+            </Card>
+          ) : (
+            <View style={st.checking}>
+              <ActivityIndicator color={c.muted} />
+              <Text style={kitStyles.small}>Getting your payment details…</Text>
+            </View>
+          )
+        ) : null}
 
-            {polling &&
-              (order.transferInstructions?.accountIdentifier ||
-                order.widgetUrl) && (
-                <>
-                  <View style={styles.statusRow}>
-                    <ActivityIndicator color={theme.colors.accent} />
-                    <Text style={f.estimate}>Waiting for payment</Text>
-                  </View>
-                  <Pressable
-                    onPress={() => void checkNow()}
-                    hitSlop={8}
-                    style={styles.linkBtn}
-                  >
-                    <Text style={styles.linkText}>I&apos;ve sent the funds</Text>
-                  </Pressable>
-                </>
-              )}
-          </>
-        )}
-        <Text style={styles.orderRef}>Order #{order.id}</Text>
-        <Secondary label={done ? "New order" : "Back"} onPress={onBack} />
-      </ScrollView>
+        {polling && !failed && !processing && (transfer?.accountIdentifier || order.widgetUrl) ? (
+          <SecondaryButton label="I've sent the funds" onPress={() => void checkNow()} />
+        ) : null}
+
+        <Card>
+          <DetailRows
+            rows={[
+              { label: "You pay", value: payLabel },
+              { label: "You receive", value: receiveLabel },
+              ...(to ? [{ label: "To", value: `${short0x(to)} on ${destination.label}` }] : []),
+            ]}
+          />
+        </Card>
+
+        <Card>
+          <Text style={kitStyles.cardTitle}>Progress</Text>
+          <ProgressList stages={stages} activeIndex={processing ? 2 : 1} failed={failed} />
+          <Text style={st.orderId} selectable>Order #{order.id}</Text>
+        </Card>
+
+        {failed ? <SecondaryButton label="Start a new order" onPress={startAgain} /> : null}
+      </FlowScreen>
     );
   }
 
-  // ----- Resuming from History: don't flash the compose form while loading ---
+  // ----- Resuming from History: don't flash the form while loading ----------
   if (resumeOrderId) {
     return (
-      <View style={styles.resumeLoading}>
-        {error ? (
-          <Text style={f.error}>{error}</Text>
-        ) : (
-          <ActivityIndicator color={theme.colors.accent} />
-        )}
-        <Secondary label="Back" onPress={onBack} />
-      </View>
+      <FlowScreen onBack={onBack}>
+        <View style={st.center}>
+          {error ? <Notice tone="error">{error}</Notice> : <ActivityIndicator color={c.muted} />}
+          <Text style={kitStyles.small}>Loading order…</Text>
+        </View>
+      </FlowScreen>
     );
   }
 
-  // ----- Compose form ------------------------------------------------------
-  const symbol = country?.currency.symbol ?? "$";
+  // ----- Compose: same layout as the Paycrest Buy screen ---------------------
+  const popular = countries.filter((co) => PAYCREST_FIAT.includes(co.currency.code as PaycrestFiat));
+  const others = countries.filter((co) => !PAYCREST_FIAT.includes(co.currency.code as PaycrestFiat));
+  const toOption = (co: RampCountry): CurrencyOption => ({
+    value: co.countryCode,
+    flag: flagEmoji(co.countryCode),
+    country: co.name,
+    code: co.currency.code,
+    name: co.currency.name,
+  });
+  // Paycrest-routed corridors ask for a refund bank by code + number + name —
+  // show the bank picker with the name check instead of three raw boxes.
+  const bankTrio =
+    !!country &&
+    PAYCREST_FIAT.includes(country.currency.code as PaycrestFiat) &&
+    fields.some((fl) => fl.key === "refundInstitution") &&
+    fields.some((fl) => fl.key === "refundAccountIdentifier");
+  const otherFields = bankTrio
+    ? fields.filter((fl) => !["refundInstitution", "refundAccountIdentifier", "refundAccountName"].includes(fl.key))
+    : fields;
+  const blocker = !country
+    ? "Choose a country"
+    : !(fiatAmount > 0)
+      ? "Enter an amount"
+      : !unitRate
+        ? rateLoading
+          ? "Loading rate…"
+          : "No live rate right now"
+        : belowMin
+          ? "Below the minimum"
+          : !addressValid
+            ? `Enter your ${destination.label} wallet address`
+            : !fieldsComplete
+              ? "Fill in the refund account"
+              : !emailValid
+                ? "Enter your email"
+                : null;
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <PageTitle>Buy</PageTitle>
-      <Intro>{`Pay with local currency, receive USDC on ${destination.label}.`}</Intro>
+    <FlowScreen onBack={onBack}>
+      <FlowHeader title="Buy crypto" subtitle="Pay with local currency, receive USDC in your wallet." />
+      <StepProgress steps={STEPS} current={0} />
 
-      <Field label="You pay">
-        <PrefixedAmountInput amount={amount} onChange={setAmount} prefix={symbol} />
-      </Field>
-      {estimateUsdc !== null && (
-        <Text style={f.estimate}>
-          ≈ {estimateUsdc.toLocaleString("en-US", { maximumFractionDigits: 2 })}{" "}
-          USDC (rate locks when you create the order)
-        </Text>
-      )}
-      {belowMin && country && (
-        <Text style={f.error}>
-          Minimum is {country.currency.minAmount.toLocaleString()}{" "}
-          {country.currency.code}.
-        </Text>
-      )}
-      {!rateLoading && country && !unitRate && (
-        <Text style={f.error}>
-          Couldn&apos;t load a live rate for {destination.label} in{" "}
-          {country.currency.code} right now.
-        </Text>
-      )}
-
-      <Field label="Pay with">
-        <Picker
-          title="Pay with"
-          searchable
-          placeholder={loading ? "Loading…" : "Select currency"}
-          value={countryCode}
-          options={countries.map((c) => ({
-            value: c.countryCode,
-            label: c.currency.name || c.currency.code,
-            sublabel: `${c.currency.code} · ${c.name}`,
-          }))}
-          onChange={setCountryCode}
-        />
-      </Field>
-
-      <Field label={`Receive USDC on ${destination.label}`}>
-        <TextInput
-          style={[
-            f.input,
-            address.length > 0 && !addressValid && styles.inputError,
-          ]}
-          value={address}
-          onChangeText={setAddress}
-          autoCapitalize="none"
-          autoCorrect={false}
-          placeholder={`Your ${destination.label} address`}
-          placeholderTextColor={theme.colors.muted}
-        />
-        {address.length > 0 && !addressValid && (
-          <Text style={f.error}>
-            That doesn&apos;t look like a valid {destination.label} address.
-          </Text>
-        )}
-      </Field>
-
-      {/* Provider fields the order requires (bank dropdown, phone, account). */}
-      {fields.map((fld) => (
-        <Field key={fld.key} label={fld.label}>
-          {fld.type === "enum" ? (
-            <Picker
-              title={fld.label}
-              searchable
-              value={fieldValues[fld.key]}
-              options={(fld.options ?? []).map((o) => ({
-                value: o.value,
-                label: o.label,
-              }))}
-              onChange={(v) =>
-                setFieldValues((p) => ({ ...p, [fld.key]: v }))
-              }
+      <AmountCard
+        label="You pay"
+        value={amount}
+        onChange={setAmount}
+        pill={
+          <>
+            <CurrencyPill
+              flag={country ? flagEmoji(country.countryCode) : "🌍"}
+              code={country?.currency.code ?? "—"}
+              country={country?.name ?? (loading ? "Loading…" : "Choose")}
+              onPress={() => setCurrencyOpen(true)}
             />
-          ) : (
-            <TextInput
-              style={f.input}
-              value={fieldValues[fld.key] ?? ""}
-              onChangeText={(t) =>
-                setFieldValues((p) => ({ ...p, [fld.key]: t }))
-              }
-              keyboardType={fld.type === "phone" ? "phone-pad" : "default"}
-              placeholder={fld.label}
-              placeholderTextColor={theme.colors.muted}
+            <CurrencySheet
+              open={currencyOpen}
+              onClose={() => setCurrencyOpen(false)}
+              title="Pay with"
+              value={countryCode}
+              popular={popular.map(toOption)}
+              others={others.map(toOption)}
+              onSelect={(o) => setCountryCode(o.value)}
             />
-          )}
-        </Field>
-      ))}
-
-      <Field label="Your email">
-        <TextInput
-          style={f.input}
-          value={email}
-          onChangeText={setEmail}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          placeholder="you@example.com"
-          placeholderTextColor={theme.colors.muted}
-        />
-        <Text style={styles.emailHint}>
-          Encrypted and used only to verify this order — never shared.
-        </Text>
-      </Field>
-
-      {error && <Text style={f.error}>{error}</Text>}
-
-      <View style={f.rowButtons}>
-        <Secondary label="Back" onPress={onBack} />
-        <Primary
-          label={quoting ? "Getting quote…" : "Continue"}
-          disabled={!canSubmit}
-          onPress={() => void submit()}
-        />
-      </View>
-    </ScrollView>
-  );
-}
-
-/** Order summary shown on the checkout screen so the user isn't paying blind. */
-function OrderSummary({
-  pay,
-  receive,
-  chain,
-  address,
-}: {
-  pay: string;
-  receive: string;
-  chain: string;
-  address: string;
-}) {
-  return (
-    <View style={styles.summaryCard}>
-      <SummaryRow label="You pay" value={pay} />
-      <SummaryRow label="You receive" value={receive} accent />
-      <SummaryRow label="On" value={chain} />
-      {address ? (
-        <SummaryRow
-          label="To"
-          value={`${address.slice(0, 6)}…${address.slice(-4)}`}
-        />
-      ) : null}
-    </View>
-  );
-}
-
-function SummaryRow({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: boolean;
-}) {
-  return (
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>{label}</Text>
-      <Text
-        style={[styles.summaryValue, accent && styles.summaryValueAccent]}
-        numberOfLines={1}
+          </>
+        }
       >
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-/** The bank account the buyer transfers fiat into — the real action for
- *  bank-transfer providers (no checkout). Each value copies on tap. */
-function TransferInstructionsCard({
-  info,
-  cryptoCurrency,
-}: {
-  info: TransferInstructions;
-  cryptoCurrency: string;
-}) {
-  const currency = info.currency ?? "";
-  const amount = info.amountToTransfer
-    ? `${Number(info.amountToTransfer).toLocaleString("en-US")} ${currency}`.trim()
-    : "";
-  return (
-    <View style={styles.transferCard}>
-      <Text style={styles.transferTitle}>Send this transfer</Text>
-      <Text style={styles.transferIntro}>
-        Transfer exactly {amount || "the amount"} from your own bank account to
-        the account below. Your {cryptoCurrency} is released once it lands.
-      </Text>
-      <TransferRow
-        label="Amount"
-        value={amount || "—"}
-        copy={info.amountToTransfer}
-        strong
-      />
-      <TransferRow label="Bank" value={info.institution ?? "—"} />
-      <TransferRow
-        label="Account number"
-        value={info.accountIdentifier ?? "—"}
-        copy={info.accountIdentifier}
-        strong
-      />
-      <TransferRow label="Account name" value={info.accountName ?? "—"} />
-    </View>
-  );
-}
-
-function TransferRow({
-  label,
-  value,
-  copy,
-  strong,
-}: {
-  label: string;
-  value: string;
-  copy?: string;
-  strong?: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = async () => {
-    if (!copy) return;
-    const ok = await copyToClipboard(copy);
-    if (ok) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    }
-  };
-  return (
-    <View style={styles.transferRow}>
-      <Text style={styles.transferRowLabel}>{label}</Text>
-      <View style={styles.transferRowRight}>
-        <Text
-          style={[
-            styles.transferRowValue,
-            strong && styles.transferRowValueStrong,
-          ]}
-          numberOfLines={1}
-        >
-          {value}
-        </Text>
-        {copy ? (
-          <Pressable onPress={() => void onCopy()} hitSlop={8}>
-            <Feather
-              name={copied ? "check" : "copy"}
-              size={15}
-              color={theme.colors.muted}
-            />
-          </Pressable>
+        {belowMin && country ? (
+          <Text style={st.warn}>
+            Minimum is {country.currency.minAmount.toLocaleString()} {country.currency.code}.
+          </Text>
         ) : null}
-      </View>
-    </View>
+      </AmountCard>
+
+      {!rateLoading && country && !unitRate ? (
+        <Text style={st.warn}>
+          Couldn&apos;t load a live rate for {destination.label} in {country.currency.code} right now.
+        </Text>
+      ) : (
+        <RateLine
+          approximate
+          rate={unitRate && country ? { from: "1 USDC", to: `${unitRate.toLocaleString("en-US")} ${country.currency.code}` } : null}
+        />
+      )}
+
+      <AmountCard
+        label="You receive"
+        readOnly
+        prefix="≈"
+        value={estimateUsdc !== null ? estimateUsdc.toLocaleString("en-US", { maximumFractionDigits: 2 }) : ""}
+        pill={chainPicker}
+      />
+
+      <Card>
+        <View style={{ gap: 6 }}>
+          <FieldLabel>Receive USDC to</FieldLabel>
+          <TextField
+            mono
+            value={address}
+            onChangeText={setAddress}
+            autoCapitalize="none"
+            placeholder={`Your ${destination.label} wallet address`}
+          />
+          {address.length > 0 && !addressValid ? (
+            <Text style={st.err}>That doesn&apos;t look like a valid {destination.label} address.</Text>
+          ) : null}
+        </View>
+
+        {fields.length > 0 ? (
+          <>
+            <View style={st.divider} />
+            <View style={{ gap: 2 }}>
+              <Text style={st.sectionTitle}>Refund account</Text>
+              <Text style={kitStyles.small}>This account will be used for any refunds.</Text>
+            </View>
+          </>
+        ) : null}
+
+        {bankTrio && country ? (
+          <BankAccount
+            currency={country.currency.code as PaycrestFiat}
+            value={{
+              institution: fieldValues.refundInstitution ?? "",
+              institutionName: refundBankName,
+              accountIdentifier: fieldValues.refundAccountIdentifier ?? "",
+              accountName: fieldValues.refundAccountName ?? "",
+            }}
+            onChange={(v) => {
+              setRefundBankName(v.institutionName);
+              // Only send keys the provider asked for (it rejects others).
+              setFieldValues((p) => ({
+                ...p,
+                refundInstitution: v.institution,
+                refundAccountIdentifier: v.accountIdentifier,
+                ...(fields.some((fl) => fl.key === "refundAccountName")
+                  ? { refundAccountName: v.accountName }
+                  : {}),
+              }));
+            }}
+            onLookupChange={() => {}}
+            wrongLabel="Not yours?"
+          />
+        ) : null}
+
+        {otherFields.map((fld) => (
+          <View key={fld.key} style={{ gap: 6 }}>
+            <FieldLabel>{fld.label}</FieldLabel>
+            {fld.type === "enum" ? (
+              <Picker
+                title={fld.label}
+                searchable
+                value={fieldValues[fld.key]}
+                options={(fld.options ?? []).map((o) => ({ value: o.value, label: o.label }))}
+                onChange={(v) => setFieldValues((p) => ({ ...p, [fld.key]: v }))}
+              />
+            ) : (
+              <TextField
+                value={fieldValues[fld.key] ?? ""}
+                onChangeText={(t) => setFieldValues((p) => ({ ...p, [fld.key]: t }))}
+                keyboardType={fld.type === "phone" ? "phone-pad" : "default"}
+                placeholder={fld.label}
+              />
+            )}
+          </View>
+        ))}
+
+        <View style={{ gap: 6 }}>
+          <FieldLabel>Email (for receipts)</FieldLabel>
+          <TextField
+            value={email}
+            onChangeText={setEmail}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            placeholder="you@example.com"
+          />
+        </View>
+      </Card>
+
+      {estimateUsdc !== null ? (
+        <Text style={kitStyles.small}>Estimate · final rate locks when you create the order</Text>
+      ) : null}
+      {error ? <Notice tone="error">{error}</Notice> : null}
+
+      <PrimaryButton
+        label={quoting ? "Getting quote…" : (blocker ?? "Continue to payment")}
+        disabled={!canSubmit}
+        loading={quoting}
+        arrow
+        onPress={() => void submit()}
+      />
+    </FlowScreen>
   );
 }
 
-function SuccessCard({
-  order,
-  destination,
-}: {
-  order: RampOrder;
-  destination: RampDestination;
-}) {
+function SuccessCard({ order, destination }: { order: RampOrder; destination: RampDestination }) {
   const txUrl = rampTxUrl(destination.chainrailsChain, order.providerTxHash);
+  const crypto = order.cryptoCurrency ?? "USDC";
   return (
-    <View style={styles.successCard}>
+    <Card style={{ alignItems: "center", overflow: "hidden" }}>
       <Confetti />
       <SuccessCheck />
-      <Text style={styles.successEyebrow}>Sent</Text>
-      <Text style={styles.successAmount}>
-        {order.cryptoAmount ?? ""} {order.cryptoCurrency ?? "USDC"}
+      <Text style={st.doneAmount}>
+        {order.cryptoAmount != null ? formatToken(order.cryptoAmount, crypto, 2) : crypto}
       </Text>
-      <Text style={styles.successSub}>
-        {order.cryptoCurrency ?? "USDC"} has been sent to your{" "}
-        {destination.label} wallet
-        {order.recipientAddress
-          ? `\n${order.recipientAddress.slice(0, 6)}…${order.recipientAddress.slice(-4)}`
-          : ""}
+      <Text style={[kitStyles.small, { textAlign: "center" }]}>
+        in your {destination.label} wallet
+        {order.recipientAddress ? ` ${short0x(order.recipientAddress)}` : ""}
       </Text>
-      {txUrl && (
-        <Pressable
-          onPress={() => void Linking.openURL(txUrl)}
-          hitSlop={8}
-          style={styles.txLink}
-        >
-          <Feather name="external-link" size={14} color={theme.colors.accent} />
-          <Text style={styles.txLinkText}>View transaction</Text>
-        </Pressable>
-      )}
-    </View>
+      {txUrl ? <TextLink label="View transaction ↗" onPress={() => void Linking.openURL(txUrl)} /> : null}
+      <Text style={st.orderId} selectable>Order #{order.id}</Text>
+    </Card>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.colors.bg },
-  content: { padding: theme.spacing(2), gap: theme.spacing(1.5) },
-  inputError: { borderColor: theme.colors.err },
-  resumeLoading: {
-    flex: 1,
-    backgroundColor: theme.colors.bg,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: theme.spacing(3),
-    gap: theme.spacing(2),
-  },
-
-  // Order summary card on the checkout screen
-  summaryCard: {
-    padding: theme.spacing(2.25),
-    borderRadius: theme.radius.cardLg,
-    backgroundColor: theme.colors.surface,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    gap: theme.spacing(1.5),
-    ...theme.shadow,
-  },
-  summaryRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: theme.spacing(2),
-  },
-  summaryLabel: { color: theme.colors.muted, fontSize: 14 },
-  summaryValue: {
-    color: theme.colors.text,
-    fontSize: 15,
-    fontWeight: "600",
-    flexShrink: 1,
-    textAlign: "right",
-  },
-  summaryValueAccent: { color: theme.colors.accent },
-
-  emailHint: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    marginTop: theme.spacing(0.5),
-  },
-
-  // Bank-transfer instructions card
-  transferCard: {
-    padding: theme.spacing(2.25),
-    borderRadius: theme.radius.cardLg,
-    backgroundColor: theme.colors.surface,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    gap: theme.spacing(1.25),
-    ...theme.shadow,
-  },
-  transferTitle: {
-    color: theme.colors.text,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  transferIntro: {
-    color: theme.colors.muted,
-    fontSize: 13,
-    lineHeight: 19,
-    marginBottom: theme.spacing(0.5),
-  },
-  transferRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: theme.spacing(1.5),
-    paddingVertical: theme.spacing(1),
-    paddingHorizontal: theme.spacing(1.25),
-    borderRadius: theme.radius.card,
-    backgroundColor: theme.colors.bg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  transferRowLabel: { color: theme.colors.muted, fontSize: 13 },
-  transferRowRight: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing(1),
-    flexShrink: 1,
-  },
-  transferRowValue: {
-    color: theme.colors.text,
-    fontSize: 14,
-    flexShrink: 1,
-    textAlign: "right",
-  },
-  transferRowValueStrong: { fontWeight: "700", fontSize: 15 },
-
-  // "Secure checkout" reassurance under the primary button
-  secureRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    marginTop: -theme.spacing(0.5),
-  },
-  secureText: {
-    color: theme.colors.muted,
-    fontSize: 12.5,
-    fontWeight: "500",
-  },
-
-  // Lighter, text-only secondary action
-  linkBtn: { alignSelf: "center", paddingVertical: theme.spacing(0.5) },
-  linkText: {
-    color: theme.colors.accent,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-
-  statusRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing(1),
-    paddingVertical: theme.spacing(1),
-  },
-  orderRef: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    marginTop: theme.spacing(0.5),
-  },
-  centerCard: {
-    alignItems: "center",
-    gap: theme.spacing(0.75),
-    paddingVertical: theme.spacing(2),
-  },
-  iconRing: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: theme.spacing(0.5),
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-  },
-  iconRingErr: { backgroundColor: "#FDF2F0", borderColor: "#F5C4BC" },
-  centerTitle: {
-    color: theme.colors.text,
-    fontFamily: theme.serif,
-    fontSize: 26,
-    lineHeight: 32,
-    textAlign: "center",
-  },
-  centerSub: {
-    color: theme.colors.muted,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    maxWidth: 300,
-  },
-  successCard: {
-    position: "relative",
-    overflow: "hidden",
-    alignItems: "center",
-    borderRadius: theme.radius.cardLg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-    paddingHorizontal: theme.spacing(3),
-    paddingTop: theme.spacing(3.5),
-    paddingBottom: theme.spacing(3),
-    gap: theme.spacing(0.5),
-    ...theme.shadow,
-  },
-  successEyebrow: {
-    color: theme.colors.ok,
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginTop: theme.spacing(1.5),
-  },
-  successAmount: {
-    color: theme.colors.text,
-    fontFamily: theme.serif,
-    fontSize: 34,
-    lineHeight: 40,
-  },
-  successSub: {
-    color: theme.colors.muted,
-    fontSize: 13,
-    lineHeight: 19,
-    textAlign: "center",
-  },
-  txLink: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: theme.spacing(1),
-  },
-  txLinkText: {
-    color: theme.colors.accent,
-    fontSize: 14,
-    fontWeight: "600",
-  },
+const st = StyleSheet.create({
+  center: { alignItems: "center", gap: z(10), paddingVertical: z(48) },
+  checking: { flexDirection: "row", alignItems: "center", gap: z(8) },
+  divider: { height: z(1), backgroundColor: c.edgeSoft },
+  sectionTitle: { color: c.ink, fontSize: zf(15), fontWeight: "600" },
+  err: { color: c.danger, fontSize: zf(13) },
+  warn: { color: c.warnInk, fontSize: zf(13), lineHeight: z(18) },
+  doneAmount: { color: c.ink, fontSize: zf(30), fontWeight: "600", marginTop: z(8) },
+  orderId: { color: c.muted, fontSize: zf(12), fontFamily: "Menlo" },
 });

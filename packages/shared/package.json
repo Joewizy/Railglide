@@ -12,7 +12,9 @@
     "./types": "./src/types/index.ts",
     "./assistant/types": "./src/assistant/types.ts",
     "./kyc": "./src/kyc.ts",
-    "./tokenSupport": "./src/tokenSupport.ts"
+    "./tokenSupport": "./src/tokenSupport.ts",
+    "./fees": "./src/fees.ts",
+    "./support": "./src/support.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
