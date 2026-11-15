@@ -230,7 +230,8 @@ export function BuyScreen() {
         },
         buyer: buyerToSend,
         recipientAddress: recipient.trim() as `0x${string}`,
-        reference: buildPaycrestReference("onramp", recipient.trim()),
+        // Owner = connected wallet, so History finds orders sent elsewhere.
+        reference: buildPaycrestReference("onramp", address ?? recipient.trim()),
       });
       void clearComposeDraft("buy");
     } catch {
@@ -579,7 +580,7 @@ function BuyOrder({
           <SuccessCheck />
           <Text style={st.doneAmount}>{receiveLabel}</Text>
           <Text style={[kitStyles.small, { textAlign: "center" }]}>
-            {to ? `in your wallet ${short0x(to)} on ${chainName}` : `on ${chainName}`}
+            {to ? `sent to ${short0x(to)} on ${chainName}` : `on ${chainName}`}
           </Text>
           {order ? <Text style={st.orderId} selectable>Order {order.id}</Text> : null}
         </Card>

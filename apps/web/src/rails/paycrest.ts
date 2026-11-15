@@ -313,8 +313,14 @@ export function normalizePaycrestOrder(
   const source = payload.source as { type?: string } | undefined;
   const destination = payload.destination as
     { type?: string; currency?: string; recipient?: unknown } | undefined;
+  // Paycrest sends `direction` on orders and webhooks. Webhooks can leave out
+  // source/destination, so only guess from source when direction is missing.
   const direction: PaycrestDirection =
-    source?.type === "fiat" ? "onramp" : "offramp";
+    payload.direction === "onramp" || payload.direction === "offramp"
+      ? payload.direction
+      : source?.type === "fiat"
+        ? "onramp"
+        : "offramp";
 
   const providerAccount = payload.providerAccount as
     Record<string, unknown> | undefined;

@@ -84,6 +84,23 @@ function shouldReplace(prev: StoredPaycrestOrder, next: PaycrestOrder): boolean 
   return nextAt >= prevAt;
 }
 
+/**
+ * A webhook snapshot can carry fewer fields than the full order we saved when
+ * it was created (e.g. no recipient wallet or deposit account). Take the new
+ * values, but keep any old value the new snapshot is missing. An order never
+ * changes direction, so the saved direction (and its currency) always wins.
+ */
+function mergeOrder(prev: PaycrestOrder | undefined, next: PaycrestOrder): PaycrestOrder {
+  if (!prev) return next;
+  const merged: Record<string, unknown> = { ...prev };
+  for (const [key, value] of Object.entries(next)) {
+    if (value !== undefined && value !== null && value !== "") merged[key] = value;
+  }
+  merged.direction = prev.direction;
+  if (prev.direction !== next.direction) merged.currency = prev.currency;
+  return merged as unknown as PaycrestOrder;
+}
+
 function timeOf(iso: string | undefined): number {
   if (!iso) return 0;
   const t = Date.parse(iso);
@@ -118,9 +135,10 @@ export async function upsertStoredOrder(
     const nowIso = new Date().toISOString();
     const becameTerminal = isPaycrestTerminalStatus(order.status);
     const record: StoredPaycrestOrder = {
-      order,
-      // Don't lose a wallet we already attributed if a later event omits it.
-      walletAddress: meta.walletAddress ?? existing?.walletAddress ?? null,
+      order: mergeOrder(existing?.order, order),
+      // The owner is set when the order is created; later events (webhooks)
+      // can't change it — they only know the destination address.
+      walletAddress: existing?.walletAddress ?? meta.walletAddress ?? null,
       event: meta.event ?? existing?.event ?? null,
       updatedAt: nowIso,
       terminalAt: becameTerminal
@@ -175,6 +193,17 @@ export async function getStoredOrder(
   } catch (err) {
     console.error("[orderStore] getStoredOrder failed", err);
     return null;
+  }
+}
+
+/** Ids of the orders recorded for a wallet. Empty when the store is off or erroring. */
+export async function listStoredOrderIdsByWallet(address: string): Promise<string[]> {
+  if (!redis) return [];
+  try {
+    return (await redis.zrange<string[]>(walletIndexKey(address), 0, -1)) ?? [];
+  } catch (err) {
+    console.error("[orderStore] listStoredOrderIdsByWallet failed", err);
+    return [];
   }
 }
 

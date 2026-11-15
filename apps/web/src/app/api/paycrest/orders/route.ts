@@ -7,6 +7,7 @@ import {
   type PaycrestHistoryOrder,
 } from "@/rails/paycrest";
 import { getSession } from "@/lib/session";
+import { listStoredOrderIdsByWallet } from "@/lib/orderStore";
 
 /**
  * GET /api/paycrest/orders
@@ -76,8 +77,12 @@ export async function GET(req: NextRequest) {
     if (orders.length < PAGE_SIZE || (total && list.length >= total)) break;
   }
 
+  // Orders we recorded for this wallet when they were created. Catches a Buy
+  // whose USDC went to another address (e.g. an exchange).
+  const ownedIds = new Set(await listStoredOrderIdsByWallet(address));
+
   const orders: PaycrestHistoryOrder[] = list
-    .filter((o) => orderMatchesWallet(o, address))
+    .filter((o) => ownedIds.has(String(o.id)) || orderMatchesWallet(o, address))
     .map((o) => summarizePaycrestOrderForHistory(o))
     .sort((a, b) => {
       const aExpired = a.status === "expired" ? 1 : 0;

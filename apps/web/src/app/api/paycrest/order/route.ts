@@ -18,6 +18,7 @@ import {
 } from "@railglide/shared/kyc";
 import { redis } from "@/lib/redis";
 import { upsertStoredOrder } from "@/lib/orderStore";
+import { getSession } from "@/lib/session";
 
 /**
  * Deterministic fingerprint of an order's economic content within a 10-minute
@@ -288,8 +289,11 @@ export async function POST(req: NextRequest) {
     }
   }
   // Seed the store so polling reads from Redis without waiting for a webhook.
+  // The order belongs to the signed-in wallet, even when the USDC goes to
+  // another address (e.g. an exchange), so History can still find it.
   await upsertStoredOrder(order, {
-    walletAddress: walletFromPaycrestPayload(payload),
+    walletAddress:
+      getSession(req)?.address?.toLowerCase() ?? walletFromPaycrestPayload(payload),
     event: "created",
   });
   return NextResponse.json(order);

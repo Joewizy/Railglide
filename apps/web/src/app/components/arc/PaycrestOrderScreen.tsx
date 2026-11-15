@@ -173,7 +173,16 @@ export function PaycrestOrderScreen(props: PaycrestOrderScreenProps) {
     : (onrampOrder?.txHash ?? null);
   const receiptHref =
     receiptTx && settlementChain ? explorerTxUrl(settlementChain, receiptTx) : null;
-  const cryptoRecipient = onrampOrder?.recipientAddress ?? walletAddress ?? null;
+  // Buy: where the USDC goes. The order's own address first, then the address
+  // typed on the Buy form. The connected wallet is only a last resort.
+  const cryptoRecipient =
+    onrampOrder?.recipientAddress ?? exec?.recipient?.trim() ?? walletAddress ?? null;
+  const toOwnWallet =
+    !!cryptoRecipient &&
+    !!walletAddress &&
+    cryptoRecipient.toLowerCase() === walletAddress.toLowerCase();
+  // Buy: the bank transfer landed and the USDC is on its way.
+  const onrampSending = !isOfframp && !done && !onrampWaiting && !!onrampOrder && !railError;
 
   // Buy amounts come straight from the order.
   const payAmount =
@@ -457,6 +466,46 @@ export function PaycrestOrderScreen(props: PaycrestOrderScreenProps) {
               </Card>
             )}
 
+            {/* Buy: payment arrived, USDC on its way */}
+            {onrampSending && (
+              <Card primary>
+                <div className="flex items-center gap-3">
+                  <span className="grid size-8 flex-none place-items-center rounded-full bg-success text-white">
+                    <CheckIcon size={15} />
+                  </span>
+                  <div className="flex min-w-0 flex-col">
+                    <span className="text-[15px] font-semibold">Payment received</span>
+                    <span className="text-[13px] text-muted">{payAmount} arrived</span>
+                  </div>
+                </div>
+                <div className="ml-4 h-4 w-0.5 bg-success" />
+                <div className="flex items-center gap-3">
+                  <span className="grid size-8 flex-none place-items-center rounded-full border-2 border-ink">
+                    <span className="size-4 animate-spin rounded-full border-2 border-ink border-t-transparent" />
+                  </span>
+                  <div className="flex min-w-0 flex-col">
+                    <span className="text-[15px] font-semibold">
+                      Sending {receiveLabel}
+                    </span>
+                    <span className="text-[13px] text-muted">
+                      {cryptoRecipient ? (
+                        <>
+                          to <span className="font-mono">{short0x(cryptoRecipient)}</span> on{" "}
+                          {chainLabel}
+                        </>
+                      ) : (
+                        `on ${chainLabel}`
+                      )}
+                    </span>
+                  </div>
+                </div>
+                <p className="mt-4 text-[13px] leading-normal text-muted">
+                  Usually under a minute. This page updates on its own, and you
+                  can leave — the order keeps going and shows in History.
+                </p>
+              </Card>
+            )}
+
             {/* Sell: the deposit window closed */}
             {isOfframp && isExpired &&
               (stuckAfterPaid ? (
@@ -497,7 +546,9 @@ export function PaycrestOrderScreen(props: PaycrestOrderScreenProps) {
                       ? `delivered to ${payoutName}${[payoutBank, payoutAcct].filter(Boolean).length ? ` · ${[payoutBank, payoutAcct].filter(Boolean).join(" · ")}` : ""}`
                       : "delivered"
                     : cryptoRecipient
-                      ? `in your wallet ${short0x(cryptoRecipient)} on ${chainLabel}`
+                      ? toOwnWallet
+                        ? `in your wallet ${short0x(cryptoRecipient)} on ${chainLabel}`
+                        : `sent to ${short0x(cryptoRecipient)} on ${chainLabel}`
                       : `on ${chainLabel}`}
                 </p>
                 {completedLabel(order) && (

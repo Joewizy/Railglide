@@ -857,22 +857,30 @@ function paycrestOnrampStages(
   token: string | null
 ): { stages: StageRow[]; activeIndex: number; done: boolean } {
   const dstName = toChain ? (getChain(toChain)?.name ?? toChain) : "chain";
+  const coin = token ?? "USDC";
+  // Each step's text changes once that step is behind us, so a finished
+  // order doesn't still say "waiting".
+  const paid = status === "settling" || status === "complete";
+  const done = status === "complete";
   const stages: StageRow[] = [
     {
       l: "Rate locked",
       d: "We've opened an account for your payment.",
     },
+    paid
+      ? { l: "Payment received", d: "Your bank transfer arrived." }
+      : {
+          l: "Waiting for your payment",
+          d: "This page updates on its own when it arrives.",
+        },
+    done
+      ? { l: `${coin} sent`, d: `Sent on ${dstName}.` }
+      : paid
+        ? { l: `Sending your ${coin}`, d: "Usually under a minute." }
+        : { l: `Sending your ${coin}`, d: "Starts once your payment arrives." },
     {
-      l: "Waiting for your payment",
-      d: "This page updates on its own when it arrives.",
-    },
-    {
-      l: `Sending your ${token ?? "USDC"}`,
-      d: "Starts once your payment is confirmed.",
-    },
-    {
-      l: `You receive ${token ?? "USDC"}`,
-      d: `In your wallet on ${dstName}.`,
+      l: done ? `${coin} received` : `You receive ${coin}`,
+      d: `At your wallet address on ${dstName}.`,
     },
   ];
 
@@ -1283,7 +1291,9 @@ export function StatusScreen({
             },
             buyer,
             recipientAddress: destination,
-            reference: buildPaycrestReference("onramp", destination),
+            // Tag the order with the connected wallet (the owner), not the
+            // destination — so History finds it when the USDC goes elsewhere.
+            reference: buildPaycrestReference("onramp", address ?? destination),
           })
           .catch(() => {});
         return;
